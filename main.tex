@@ -1,14 +1,857 @@
-\documentclass{article}
-\usepackage{graphicx} % Required for inserting images
+% Foveated Stereo Rendering in Blender: A Unified Sensor Framework
+% VISGRAF Lab technical report, course reading. Draft 5 November 2026.
+% Source of truth for the text: the Claude Doc of the same title. Build: pdflatex twice.
+% The report describes fov3d.rendering as if implemented; class and command names follow the design plan.
+\documentclass[11pt,a4paper]{article}
 
-\title{fov-render-tr}
-\author{lvelho }
-\date{November 2026}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+% Latin Modern where installed; without it microtype cannot expand the bitmap fonts.
+\IfFileExists{lmodern.sty}{\usepackage{lmodern}\usepackage{microtype}}{\usepackage[expansion=false]{microtype}}
+\usepackage[a4paper,top=2.5cm,bottom=2.6cm,left=2.6cm,right=2.6cm]{geometry}
+\usepackage{textcomp}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[font=small,labelfont=bf]{caption}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.geometric}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.16}
+\usepackage[section]{placeins}% floats stay in their section
+\usepackage[hidelinks]{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black!70!blue,citecolor=black!70!blue,urlcolor=black!70!blue,
+  pdftitle={Foveated Stereo Rendering in Blender: A Unified Sensor Framework},
+  pdfauthor={Luiz Velho, with Claude (Anthropic)},
+  pdfsubject={VISGRAF technical report, draft 5 November 2026}}
+
+% ---------------------------------------------------------------- VISGRAF cover
+% The VISGRAF TR cover comes from techrep-ic.sty. Where the style is available the cover
+% is made; elsewhere the report builds without it.
+\IfFileExists{techrep-ic.sty}{%
+  \usepackage{techrep-ic}%
+  \newcommand{\MakeVisgrafCover}{%
+    \TRNumber{XX}   % <-- set the report number (printed as TR-26-XX)
+    \TRYear{26}     % two digits
+    \TRMonth{11}    % numeric 01-12
+    \TRAuthor{Luiz Velho, Claude}
+    \TRTitle{Foveated Stereo Rendering in Blender:\\A Unified Sensor Framework}
+    \TRMakeCover}%
+}{\newcommand{\MakeVisgrafCover}{}}
+
+% ---------------------------------------------------------------- helpers
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\cell}{\raggedright\arraybackslash}
+\newcolumntype{L}{>{\cell}X}
+\setlist{itemsep=2pt,topsep=4pt}
+\renewcommand{\arraystretch}{1.15}
+\setlength{\emergencystretch}{1.5em}
+\renewcommand{\topfraction}{0.9}\renewcommand{\bottomfraction}{0.6}\renewcommand{\textfraction}{0.08}\renewcommand{\floatpagefraction}{0.8}
+
+% maths shorthands
+\newcommand{\vb}[1]{\mathbf{#1}}
+\newcommand{\emax}{e_{\max}}
+\DeclareMathOperator{\atantwo}{atan2}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\normalize}{normalize}
+
+% code listings (ASCII only, so pdflatex needs no extra setup)
+\definecolor{codebg}{gray}{0.96}
+\definecolor{codecomment}{gray}{0.40}
+\lstdefinestyle{fov}{
+  basicstyle=\ttfamily\footnotesize, columns=fullflexible, keepspaces=true,
+  backgroundcolor=\color{codebg}, frame=none, xleftmargin=0.6em, xrightmargin=0.6em,
+  aboveskip=0.8em, belowskip=0.8em, showstringspaces=false,
+  commentstyle=\color{codecomment}, keywordstyle=\bfseries, upquote=true}
+\lstset{style=fov}
+
+\title{\textbf{Foveated Stereo Rendering in Blender:\\A Unified Sensor Framework}}
+\author{Luiz Velho\\[2pt] \normalsize with Claude (Anthropic)\\[2pt]
+  \normalsize VISGRAF Lab, IMPA}
+\date{\normalsize Technical Report \textperiodcentered{} course reading \textperiodcentered{} draft 5 November 2026}
 
 \begin{document}
 
+\MakeVisgrafCover
 \maketitle
 
-\section{Introduction}
+\begin{abstract}
+\noindent A camera samples a scene uniformly; an eye does not. This report describes \code{fov3d.rendering}, a
+framework that turns Blender's Cycles path tracer into a binocular, gaze-directed observer. Two eyes on a fixed
+head can each carry one of four sensors: a log-polar foveated camera, a perspective tangent-plane camera, an
+equirectangular panorama and a wide reference view. Every look, whatever the sensor, returns the same record: one
+ray per sample with its direction, radiance, solid-angle footprint and, as oracle, the surface it hit. The
+framework unifies two research code bases from the VISGRAF laboratory, fov-3d-vision~\cite{fov3d} and
+f3d-vision~\cite{f3d}.
+
+The reader should come away with four things: why foveated, active sampling is worth simulating
+(Section~\ref{sec:motivation}); how the framework is layered (Section~\ref{sec:arch}); the geometry and sampling
+mathematics behind each sensor and each measurement (Sections~\ref{sec:rig}--\ref{sec:noise}); and how to drive
+it from Python (Section~\ref{sec:api}). Implementation detail is kept at the level of modules and interfaces.
+\end{abstract}
+
+% ================================================================================================
+\section{Motivation}\label{sec:motivation}
+
+Foveation is first a bandwidth decision and only then an attention mechanism: an observer that samples finely
+where it looks and coarsely elsewhere sees the same field with about fifty times fewer rays, and must then decide
+where to look.
+
+\subsection{The bandwidth argument}
+
+Take a field of $45^\circ$ around the gaze and a foveal spacing of $s_0 = 0.05^\circ$ per sample. A uniform
+sampler at that spacing needs about 2.5 million rays. The log-polar sensor of Section~\ref{sec:warp} covers the
+same field with 50{,}269 rays: \textbf{50.8$\times$ fewer}, as measured in fov-3d-vision's step
+A3~\cite{fov3dA3}. The saving comes from where the samples go: 16\% of them land within $5^\circ$ of the gaze, a
+cone that holds only 1.3\% of the field's solid angle (0.19\% of the full sphere).
+
+The price is that most of the scene is seen coarsely at any moment. Fine detail must be collected by moving the
+gaze, so sensing becomes a sequence of decisions.
+
+\subsection{The active loop}
+
+Both code bases organise vision as a loop: \textbf{fixate} (render a binocular look), \textbf{reconstruct} (turn
+the fovea's matches into metric 3-D points), \textbf{update memory} (fuse them into a persistent map and mark the
+sphere of directions already seen) and \textbf{saccade} (choose the next gaze). Two results show what the loop
+buys:
+\begin{itemize}
+\item In fov-3d-vision, fifty foveated fixations of the Classroom scene measured 92\% of a $60^\circ$ field of
+  regard at a median inverse-depth error of 0.04\,m$^{-1}$, with coverage-first, random and information-seeking
+  policies within 12\% of each other~\cite{fov3dC}.
+\item In f3d-vision, a greedy explorer with perspective foveae saw 100.00\% of the sphere around the head and
+  reconstructed depth for 99.26\% of it, in 356 fixations~\cite{f3d,tr11}.
+\end{itemize}
+
+\subsection{Why a simulator with an oracle}
+
+A rendered scene knows, for every ray, the point it hit and the object that point belongs to. That oracle lets an
+experiment separate three sources of error that a real camera mixes together: the sensor, the stereo matcher and
+the gaze policy. A path tracer also produces physically plausible radiance, with noise whose level is set by the
+number of samples, so sensing cost can be controlled and measured (Section~\ref{sec:noise}).
+
+\subsection{Why one framework}
+
+The two code bases grew apart. fov-3d-vision built the log-polar foveated camera and a spherical stereo field;
+f3d-vision built a $12^\circ$ perspective pair with oracle correspondence, a persistent surfel map and a render
+server. Questions that cross the line, such as whether the log-polar sensor changes the explorer's coverage at
+equal rays, need both sensors behind one rig, one render configuration and one output record. That is what this
+framework provides, for any \code{.blend} scene.
+
+Three working rules carry over from both projects and shape the design: every number is either measured or
+labelled an estimate; every component ships a check that can fail; and data the observer may see is kept apart
+from data only the evaluator may see.
+
+% ================================================================================================
+\section{Architecture}\label{sec:arch}
+
+The framework is a stack of layers that every sensor shares, with only the camera swapped per look: a caller
+sends a request, one handler inside Blender renders it, and one record per eye comes back
+(Figure~\ref{fig:arch}).
+
+\begin{figure}[!htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={draw=black!45, rounded corners=3pt, align=center, inner sep=3pt, anchor=north west},
+  hot/.style={box, draw=blue!65!black, very thick, fill=blue!8},
+  arr/.style={-{Stealth[length=5pt]}, draw=black!45, thick},
+  lab/.style={font=\footnotesize, text=black!60, anchor=west}]
+  % callers
+  \node[box, minimum width=7.4cm, minimum height=1.15cm, text width=7.1cm] (host) at (0,0)
+    {\textbf{Python program: \code{Session(...)}}\\ {\footnotesize\color{black!65} Blender runs as a server in the background}};
+  \node[box, minimum width=7.4cm, minimum height=1.15cm, text width=7.1cm] (inb) at (8.1,0)
+    {\textbf{Blender script: \code{Session.in\_process()}}\\ {\footnotesize\color{black!65} same handler, no second process}};
+  % container
+  \node[box, draw=black!45, fill=black!4, minimum width=15.5cm, minimum height=5.05cm] (blender) at (0,-2.05) {};
+  \node[anchor=north west, font=\small\bfseries] at (0.2,-2.15) {Blender: the request handler};
+  % row 1
+  \node[box, fill=white, minimum width=4.85cm, minimum height=1.45cm, text width=4.55cm] (scene) at (0.3,-2.75)
+    {\textbf{Scene}\\ {\footnotesize\color{black!65} any \code{.blend}, head from \code{EYE},\\ sanitised, instances numbered}};
+  \node[box, fill=white, minimum width=4.85cm, minimum height=1.45cm, text width=4.55cm] (config) at (5.33,-2.75)
+    {\textbf{RenderConfig}\\ {\footnotesize\color{black!65} spp, seeds, box filter, device;\\ read back after every render}};
+  \node[box, fill=white, minimum width=4.85cm, minimum height=1.45cm, text width=4.55cm] (rig) at (10.36,-2.75)
+    {\textbf{Rig} (Sec.~\ref{sec:rig})\\ {\footnotesize\color{black!65} eyes at $\pm b/2$, gaze,\\ vergence, roll}};
+  \node[lab] at (0.2,-4.5) {sensors (Sec.~\ref{sec:warp}--\ref{sec:sensors}), one chosen per look};
+  % row 2: sensors
+  \node[hot, minimum width=3.6cm, minimum height=1.45cm, text width=3.3cm] (fov) at (0.3,-4.95)
+    {\textbf{Foveated}\\ {\footnotesize OSL log-polar warp\\ $45^\circ$ cone, disc mask}};
+  \node[box, fill=white, minimum width=3.6cm, minimum height=1.45cm, text width=3.3cm] (persp) at (4.08,-4.95)
+    {\textbf{Perspective}\\ {\footnotesize\color{black!65} pinhole from $K$\\ $12^\circ$ core + margin}};
+  \node[box, fill=white, minimum width=3.6cm, minimum height=1.45cm, text width=3.3cm] (pano) at (7.86,-4.95)
+    {\textbf{Panorama}\\ {\footnotesize\color{black!65} equirectangular\\ full sphere}};
+  \node[box, fill=white, minimum width=3.6cm, minimum height=1.45cm, text width=3.3cm] (refv) at (11.64,-4.95)
+    {\textbf{Reference view}\\ {\footnotesize\color{black!65} wide pinhole\\ for figures}};
+  % outputs
+  \node[box, minimum width=10.4cm, minimum height=1.45cm, text width=10.1cm] (rec) at (0,-8.0)
+    {\textbf{\code{SampleRecord}, one per eye} (Sec.~\ref{sec:record})\\
+     {\footnotesize\color{black!65} observation: origin, direction, value, footprint\\
+      oracle (when declared): position, distance, instance}};
+  \node[box, minimum width=4.4cm, minimum height=1.45cm, text width=4.1cm] (eval) at (11.1,-8.0)
+    {\textbf{\code{evaluation\_only/}}\\ {\footnotesize\color{black!65} never read by\\ the observer}};
+  \node[box, minimum width=10.4cm, minimum height=1.15cm, text width=10.1cm] (yours) at (0,-10.3)
+    {\textbf{Your code}\\ {\footnotesize\color{black!65} matcher, memory, gaze policy}};
+  % arrows
+  \draw[arr] (3.7,-1.15) -- (3.7,-2.05) node[midway, lab, xshift=2pt] {a JSON request per look};
+  \draw[arr] (11.8,-1.15) -- (11.8,-2.05) node[midway, lab, xshift=2pt] {direct call};
+  \draw[arr] (5.2,-7.1) -- (5.2,-8.0) node[midway, lab, xshift=2pt] {radiance, Position, Object Index};
+  \draw[arr] (13.3,-7.1) -- (13.3,-8.0) node[midway, lab, xshift=2pt] {references};
+  \draw[arr] (5.2,-9.45) -- (5.2,-10.3);
+\end{tikzpicture}
+\caption{Architecture of \code{fov3d.rendering}: two entry points, one request handler, four sensors and one
+record per eye. The foveated sensor is highlighted because it is the one sensor no off-the-shelf camera
+provides.}\label{fig:arch}
+\end{figure}
+
+Each layer has one job:
+\begin{itemize}
+\item \textbf{Scene.} Opens any \code{.blend} file once per session and fixes the head at the scene's \code{EYE}
+  object. It removes anything in the file that would override the framework's settings (an animated seed, extra
+  render passes), numbers every renderable object so the Object Index pass can name it, and runs the sanity
+  checks of Section~\ref{sec:checks}.
+\item \textbf{RenderConfig.} One frozen set of Cycles settings for the session: samples per pixel, seeds, a box
+  pixel filter, no adaptive sampling or denoising, the GPU back-end. After every render the settings Cycles
+  actually used are read back and stored with the look (Section~\ref{sec:noise}).
+\item \textbf{Rig.} Turns a gaze request into a world pose for each eye, with one formula for every sensor
+  (Section~\ref{sec:rig}).
+\item \textbf{Sensors.} Each sensor has two halves: a numpy \emph{model} that maps pixels to rays and gives each
+  pixel's footprint, and a Blender \emph{builder} that creates the camera. Analysis code uses the model without
+  Blender (Sections~\ref{sec:warp}--\ref{sec:sensors}).
+\item \textbf{Record.} Converts the rendered passes into a \code{SampleRecord}, one entry per valid sample, with
+  each field labelled as observation or oracle. References go to a separate \code{evaluation\_only/} area
+  (Section~\ref{sec:record}).
+\item \textbf{Execution.} A \code{Session} either runs Blender as a persistent background server fed one JSON
+  request per look, or, inside a Blender script, calls the same handler directly (Section~\ref{sec:first}).
+\end{itemize}
+
+Two properties follow from this layout. The record does not depend on the sensor, so downstream code (a matcher,
+a map, a gaze policy) can switch sensors without change. And the observer's view and the evaluator's truth are
+separated by construction, not by convention.
+
+% ================================================================================================
+\section{Coordinate frames and the binocular rig}\label{sec:rig}
+
+All sensors share one rig: a fixed head with two eyes that rotate about their own centres, so every look is fully
+described by the head pose, which eye, a gaze direction and a roll convention.
+
+\subsection{Frames}\label{sec:frames}
+
+\begin{itemize}
+\item \textbf{World $W$.} Blender's frame, in metres, with $+Z$ up.
+\item \textbf{Head $H$.} The rigid frame of the scene's \code{EYE} object, fixed for a whole run: $+X$ to the
+  right (along the baseline), $+Y$ up, $-Z$ forward. It is given by a rotation $R_{WH}$ and an origin $\vb{o}$.
+\item \textbf{Eye camera $E$.} Blender's camera convention: the camera looks along its local $-Z$ with $+Y$ up and
+  $+X$ right. Computer-vision code uses the OpenCV convention ($x$ right, $y$ down, $z$ forward); the two differ
+  by $C = \mathrm{diag}(1,-1,-1)$.
+\end{itemize}
+
+The eye centres lie on the head's $X$ axis, a baseline $b$ apart ($b = 63$\,mm by default):
+\begin{equation}\label{eq:centres}
+\vb{c}_{L,R} = \vb{o} \mp \tfrac{b}{2}\, R_{WH}\, \hat{\vb{x}} .
+\end{equation}
+
+\subsection{Gaze}\label{sec:gaze}
+
+A gaze is a yaw $\psi$ (positive to the right) and a pitch $\theta$ (positive up), measured in the head frame.
+The gaze direction is
+\begin{equation}\label{eq:gaze}
+\vb{d}(\psi,\theta) = (\sin\psi\cos\theta,\; \sin\theta,\; -\cos\psi\cos\theta),
+\end{equation}
+and its inverse is $\psi = \atantwo(d_x, -d_z)$, $\theta = \atantwo\bigl(d_y, \sqrt{d_x^2 + d_z^2}\bigr)$. The
+same formula, read with $\psi$ as longitude and $\theta$ as latitude, is the panorama's pixel-to-direction map
+(Section~\ref{sec:pano}), which is why every sensor agrees on what ``straight ahead'' means.
+
+The world pose of an eye camera is one composition, used by every sensor:
+\begin{equation}\label{eq:pose}
+M_{\mathrm{eye}} = T(\vb{o})\; R_{WH}\; T\bigl(\pm\tfrac{b}{2}\hat{\vb{x}}\bigr)\; R_y(-\psi)\; R_x(\theta)\; R_{\mathrm{roll}} .
+\end{equation}
+Applying $R_y(-\psi)\,R_x(\theta)$ to the camera's forward axis $(0,0,-1)$ gives exactly $\vb{d}(\psi,\theta)$:
+yaw is applied after pitch, so the elevation of the gaze equals $\theta$. The head never translates; only the eyes
+rotate.
+
+\subsection{Vergence}\label{sec:vergence}
+
+A binocular look fixates one point $\vb{P}$. Each eye's gaze is the unit vector from its centre to $\vb{P}$,
+expressed in the head frame and converted to $(\psi_i,\theta_i)$ by the inverse above:
+\begin{equation}\label{eq:vergence}
+\vb{d}_i = R_{WH}^{\top}\,\frac{\vb{P}-\vb{c}_i}{\lVert\vb{P}-\vb{c}_i\rVert}, \qquad i \in \{L, R\}.
+\end{equation}
+The vergence angle is $\gamma = \arccos(\vb{d}_L\cdot\vb{d}_R)$. For a point straight ahead at distance $D$ it is
+$\gamma = 2\arctan(b/2D)$; at the 2.10\,m used by the perspective experiments that is $1.72^\circ$. A look can be
+requested three ways: by a world point $\vb{P}$, by a cyclopean gaze plus a distance $D$ (then
+$\vb{P} = \vb{o} + D\,\vb{d}$), or by giving each eye its own $(\psi,\theta)$.
+
+\subsection{Roll}\label{sec:roll}
+
+A gaze direction fixes the camera's forward axis but not its rotation about that axis. The framework offers two
+conventions, and each fails in a different place:
+\begin{itemize}
+\item \textbf{Upright} (zero torsion): the image $x$ axis is kept in the head's horizontal plane,
+  $\hat{\vb{x}} = \normalize(\hat{\vb{z}} \times \hat{\vb{y}}_H)$, with $\hat{\vb{z}}$ the forward axis in OpenCV
+  convention. It is undefined when looking straight up or down.
+\item \textbf{Baseline-projected}: the head's baseline direction $\vb{h} = \hat{\vb{x}}_H$ is projected into the
+  image plane, $\hat{\vb{x}} = \normalize\bigl(\vb{h} - (\vb{h}\cdot\hat{\vb{z}})\,\hat{\vb{z}}\bigr)$. It is
+  undefined only when looking along the baseline, where binocular depth is undefined anyway, which makes it the
+  right choice for stereo all around the sphere.
+\end{itemize}
+For a verged pair the fixation's epipolar plane contains the baseline and both gaze axes, so baseline-projected
+roll keeps that plane on the central image row of both eyes. The foveated sensor's warp is circularly symmetric,
+so roll only rotates its disc and does not change what it measures; the perspective pair's rectification depends
+on it. Roll is therefore a property of the rig, recorded with every look, not of the sensor.
+
+% ================================================================================================
+\section{The foveated log-polar warp}\label{sec:warp}
+
+The foveated sensor is a Cycles camera, written in OSL, that maps a square raster onto a cone of directions so
+that the spacing between samples grows linearly with eccentricity. One parameter, $E_2$, sets the budget; the
+field's half-angle $\emax$ costs only logarithmically.
+
+\subsection{The spacing law}\label{sec:spacing}
+
+Let $e$ be the angle between a ray and the gaze. The sensor places samples with spacing
+\begin{equation}\label{eq:spacing}
+s(e) = s_0\left(1 + \frac{e}{E_2}\right),
+\end{equation}
+where $s_0$ is the foveal spacing and $E_2$ is the eccentricity at which the spacing has doubled. This is the
+linear form used to describe cortical magnification in primate vision. The framework uses $E_2 = 2^\circ$ and
+$\emax = 45^\circ$; fov-3d-vision found its disparity objective flat in $E_2$ (decision D16~\cite{fov3dDec}), so
+$E_2$ is chosen for cost, not accuracy.
+
+\subsection{From the spacing law to the raster}\label{sec:raster}
+
+Walking outward from the centre, each pixel advances the eccentricity by one spacing, $de/dw = s(e)$. Integrating
+gives the raster radius, in pixels, at which eccentricity $e$ is reached:
+\begin{equation}\label{eq:w}
+w(e) = \int_0^{e} \frac{de'}{s(e')} = \frac{E_2}{s_0}\,\ln\!\left(1 + \frac{e}{E_2}\right).
+\end{equation}
+The raster must reach $\emax$ at its rim, so it is $N = 2\,w(\emax)$ pixels across:
+\begin{equation}\label{eq:N}
+N = 2\,\frac{E_2}{s_0}\,\ln\!\left(1 + \frac{\emax}{E_2}\right).
+\end{equation}
+Writing $r = w(e)/w(\emax) \in [0,1]$ for the normalised radius and inverting gives the mapping the shader
+evaluates:
+\begin{equation}\label{eq:er}
+e(r) = E_2\left[\left(1 + \frac{\emax}{E_2}\right)^{r} - 1\right].
+\end{equation}
+$s_0$ has dropped out: the shader needs only $E_2$ and $\emax$, and the foveal spacing is set by the resolution
+chosen, $s_0 = 2E_2\ln(1 + \emax/E_2)/N$. The two profiles are \code{small} ($s_0 = 0.1^\circ$, $N = 126$) and
+\code{full} ($s_0 = 0.05^\circ$, $N = 253$).
+
+\paragraph{Pixel to ray.} For a raster position $(u,v)\in[0,1]^2$, let $\vb{p} = (u - \tfrac12, v - \tfrac12)$,
+$r = 2\lVert\vb{p}\rVert$ and $\varphi = \atantwo(p_y, p_x)$. In the shader's frame ($+Z$ forward) the ray is
+\begin{equation}\label{eq:dir}
+\vb{d} = (\sin e\cos\varphi,\; \sin e\sin\varphi,\; \cos e), \qquad e = e(r).
+\end{equation}
+Pixels with $r > 1$ receive zero throughput. They are masked by the analytic test $r \le 1$, never by alpha, which
+Cycles leaves at 1 even where no radiance arrives.
+
+\subsection{Footprint and anisotropy}\label{sec:footprint}
+
+Let $\rho = rN/2$ be the radius in pixels. Along the radius, consecutive pixels are one spacing $s(e)$ apart by
+construction. Around the circle they are $\sin(e)/\rho$ apart, which is smaller, so peripheral pixels are
+elongated radially. The solid angle one pixel covers is the product:
+\begin{equation}\label{eq:omega-fov}
+\omega(\rho) = \frac{\sin e}{\rho}\,\frac{de}{d\rho}, \qquad
+\frac{de}{d\rho} = \frac{2}{N}\,\ln\!\left(1+\frac{\emax}{E_2}\right)(e + E_2).
+\end{equation}
+At the centre both factors tend to $s_0$, so $\omega \to s_0^2$. At the rim of the \code{full} profile the radial
+spacing is $1.17^\circ$ and the tangential spacing $0.32^\circ$, an elongation of 3.7, and one pixel covers about
+$151\,s_0^2$. Because spacing alone does not describe a non-square pixel, the record carries each sample's
+footprint $\omega$ (Section~\ref{sec:box}).
+
+\subsection{What the warp saves}\label{sec:savings}
+
+The disc holds about $\pi N^2/4$ samples: 50{,}269 at the \code{full} profile. A uniform sampler needs about
+$\Omega/s_0^2$ samples for the cone of solid angle $\Omega = 2\pi(1 - \cos\emax) = 1.84$\,sr, which estimates
+2.42 million; counting the pixels of a uniform raster at $s_0$, fov-3d-vision measured 2{,}553{,}563, hence the
+$50.8\times$ of Section~\ref{sec:motivation}. The ratio does not depend on $s_0$, since both counts scale as
+$1/s_0^2$.
+
+\begin{figure}[!htbp]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.92\linewidth, height=6.4cm,
+  xmin=0, xmax=45, ymin=0, ymax=100,
+  xtick={0,5,...,45}, ytick={0,25,50,75,100},
+  xticklabel={$\pgfmathprintnumber{\tick}^\circ$}, yticklabel={\pgfmathprintnumber{\tick}\%},
+  xlabel={eccentricity $e$, degrees from the gaze}, ylabel={share of samples within $e$},
+  axis lines=left, grid=major, grid style={black!12},
+  tick label style={font=\small}, label style={font=\small},
+  legend pos=north west, legend cell align=left, legend style={font=\small, draw=none, fill=white}]
+\addplot[very thick, blue!70!black, mark=*, mark size=1.1pt] coordinates {
+  (0,0) (1,1.65) (2,4.82) (3,8.42) (5,15.75) (7.5,24.36) (10,32.21) (15,45.95)
+  (20,57.69) (25,67.97) (30,77.13) (35,85.42) (40,93.00) (45,100)};
+\addlegendentry{foveated warp, $E_2 = 2^\circ$}
+\addplot[very thick, black!35, mark=*, mark size=1.1pt] coordinates {
+  (0,0) (1,0.052) (2,0.208) (3,0.468) (5,1.299) (7.5,2.921) (10,5.187) (15,11.634)
+  (20,20.59) (25,31.989) (30,45.742) (35,61.745) (40,79.877) (45,100)};
+\addlegendentry{uniform at $s_0$}
+\draw[dashed, black!50] (axis cs:5,0) -- (axis cs:5,100);
+\node[anchor=east, font=\small\bfseries] at (axis cs:4.6,21) {16\%};
+\node[anchor=south west, font=\small\bfseries, text=black!55] at (axis cs:5.4,4.5) {1.3\%};
+\end{axis}
+\end{tikzpicture}
+\caption{Within $5^\circ$ of the gaze the foveated warp places 16\% of its samples, uniform sampling 1.3\%.
+Cumulative share of samples inside eccentricity $e$ over a $45^\circ$ field, computed from
+Eqs.~\eqref{eq:w}--\eqref{eq:er}.}\label{fig:share}
+\end{figure}
+
+The share of samples inside eccentricity $e$ is $r(e)^2$ for the warp and $(1 - \cos e)/(1 - \cos\emax)$ for
+uniform sampling (Figure~\ref{fig:share}). The warp puts 16\% of its samples within $5^\circ$ of the gaze, twelve
+times the uniform share. Because the raster size grows with $\ln(1 + \emax/E_2)$, widening the field is cheap:
+from $20^\circ$ to $45^\circ$ costs $1.7\times$ in raster area, and from $45^\circ$ to $80^\circ$ a further
+$1.4\times$.
+
+% ================================================================================================
+\section{Perspective and panoramic sensors}\label{sec:sensors}
+
+The other three sensors are standard Blender cameras described by the same three quantities as the warp: a
+pixel-to-ray map, a footprint per pixel and a valid region. That shared description is what lets one record hold
+any of them.
+
+\subsection{The perspective tangent pair}\label{sec:persp}
+
+Each eye is a pinhole camera on the plane tangent to the sphere of directions at the gaze. Its square raster has
+a \textbf{core} that spans $12^\circ$ and a \textbf{margin} of $\tfrac34$ of the core on every side:
+\begin{equation}\label{eq:K}
+n = c + 2\cdot\tfrac{3}{4}c, \qquad f = \frac{c}{2\tan 6^\circ}, \qquad
+K = \begin{pmatrix} f & 0 & \tfrac{n-1}{2} \\ 0 & f & \tfrac{n-1}{2} \\ 0 & 0 & 1 \end{pmatrix},
+\end{equation}
+with core $c = 128$ pixels (\code{small}) or 256 (\code{full}). At \code{full} that gives $n = 640$,
+$f = 1217.8$ pixels, a raster about $29.4^\circ$ across and a spacing of $1/f = 0.047^\circ$ at the centre, close
+to the warp's $s_0 = 0.05^\circ$. Blender is given the same camera through its lens length,
+$\text{lens} = f\cdot 36\,\text{mm}/n$ on a 36\,mm sensor.
+
+In the OpenCV frame the ray through pixel $(u,v)$, counted from the top-left pixel centre, is
+\begin{equation}\label{eq:ray-persp}
+\vb{d} \propto K^{-1}(u, v, 1)^{\top} = \left(\frac{u - c_x}{f},\; \frac{v - c_y}{f},\; 1\right),
+\end{equation}
+and the matrix $C$ of Section~\ref{sec:frames} converts it to Blender's camera frame. A pixel at offset
+$(x,y) = (u - c_x, v - c_y)$ from the principal point covers the solid angle
+\begin{equation}\label{eq:omega-persp}
+\omega(x, y) = \frac{f}{\left(f^2 + x^2 + y^2\right)^{3/2}},
+\end{equation}
+which is $1/f^2$ at the centre and only 18\% smaller at the corner: unlike the warp, this sensor is nearly uniform
+over its small field. The margin exists for the stereo matcher, which rectifies the pair and searches for
+correspondences there; only measurements in the central core of the rectified raster are accepted.
+
+\subsection{The equirectangular panorama}\label{sec:pano}
+
+The panorama sees the whole sphere from an eye centre. For a $W \times H$ raster with $H = W/2$ and normalised
+pixel centre $(u,v)$, $v = 0$ at the top row,
+\begin{equation}\label{eq:equirect}
+\lambda = \bigl(u - \tfrac12\bigr)\,2\pi, \quad \beta = \bigl(\tfrac12 - v\bigr)\,\pi, \quad
+\vb{d} = (\sin\lambda\cos\beta,\; \sin\beta,\; -\cos\lambda\cos\beta),
+\end{equation}
+which is the gaze formula~\eqref{eq:gaze} with longitude $\lambda$ as yaw and latitude $\beta$ as pitch: the
+panorama's centre pixel is the head's primary gaze. Each pixel covers
+\begin{equation}\label{eq:omega-pano}
+\omega(\beta) = \frac{2\pi}{W}\,\frac{\pi}{H}\,\cos\beta ,
+\end{equation}
+and the footprints sum to $4\pi$\,sr, a check every panorama passes (Section~\ref{sec:checks}). The panorama has
+four uses: the uniform reference at foveal spacing ($W = 7200$ gives $0.05^\circ$ at the equator), the
+noise-floor measurement, the post-hoc evaluation sphere ($720 \times 360$, $0.5^\circ$ cells) and, rendered from
+each eye centre, the per-eye truth for stereo. An optional second render overrides every material with its
+back-face flag, so a scene whose set dressing is seen from behind can be rejected.
+
+\subsection{The sensors side by side}\label{sec:side}
+
+\begin{table}[!htbp]
+\centering\footnotesize
+\begin{tabularx}{\textwidth}{@{}>{\cell}p{2.0cm} >{\cell}p{3.0cm} >{\cell}p{2.2cm} >{\cell}p{2.9cm} L@{}}
+\toprule
+Sensor & Rays per eye at \code{full} & Spacing at the gaze & Field & Used for \\
+\midrule
+foveated & 50{,}269 & $0.05^\circ$ & $45^\circ$ half-angle cone & fixations in the active loop \\
+perspective & 409{,}600 (65{,}536 in the core) & $0.047^\circ$ & $12^\circ$ core, $29.4^\circ$ raster &
+  local stereo with oracle correspondence \\
+panorama & 25.9 million ($7200 \times 3600$) & $0.05^\circ$ at the equator & full sphere &
+  references, noise floor, evaluation \\
+reference view & 4.9 million ($2400 \times 2048$) & $0.024^\circ$ & $54^\circ$ wide & figures \\
+\bottomrule
+\end{tabularx}
+\caption{The four sensors at the \code{full} profile.}\label{tab:sensors}
+\end{table}
+
+The reference view is the perspective model of Section~\ref{sec:persp} with a wide field (half-angle $27^\circ$
+horizontally) and no margin; it renders what a reader of a figure expects to see.
+
+% ================================================================================================
+\section{From pixels to geometry}\label{sec:geometry}
+
+A binocular look becomes 3-D geometry through two angles per matched ray pair: the epipolar plane they share and
+the parallax between them. Inverse depth is then, to first order, proportional to the parallax, and that fact
+sets both the measurement and its uncertainty.
+
+\subsection{What a render returns}\label{sec:passes}
+
+Each pixel carries three passes: \textbf{Combined}, the radiance $L$ the eye sees; \textbf{Position}, the world
+point $\vb{X}$ where the pixel's ray first hit a surface; and \textbf{Object Index}, the instance $k$ of that
+surface (0 for a miss). From them the record derives the range and checks the sensor model:
+\begin{equation}\label{eq:range}
+r = \lVert \vb{X} - \vb{c} \rVert, \qquad \vb{X} \approx \vb{c} + r\,\vb{d},
+\end{equation}
+where $\vb{c}$ is the eye centre and $\vb{d}$ the ray the sensor model predicts for that pixel. Range is computed
+from Position rather than read from Cycles' Depth pass, because Depth is the ray length for panoramic and custom
+cameras but need not be for a perspective one; Position means the same thing for every sensor.
+
+Position and Object Index are \textbf{oracle} data: they describe the first surface hit, which a real sensor
+cannot observe. An observer that is meant to learn from images reads only radiance and the sensor model; an
+experiment that declares oracle correspondence may also read the oracle fields (Section~\ref{sec:record}).
+
+\subsection{Oracle correspondence}\label{sec:oracle}
+
+The oracle answers the hardest question in stereo, which pixels match. For a left pixel with first hit
+$\vb{X}$, the right eye sees $\vb{X}$ along $\vb{d}_R = (\vb{X} - \vb{c}_R)/\lVert\vb{X} - \vb{c}_R\rVert$; the
+sensor model inverts that direction into a right pixel. The match is accepted only if the right eye's own
+Position at that pixel equals $\vb{X}$ within a tolerance. If it does not, $\vb{X}$ is hidden from the right eye
+by something nearer, and the left pixel is half-occluded. This is how f3d-vision's explorer gets ``perfect''
+stereo, and how fov-3d-vision measures the error of a real matcher against truth.
+
+\subsection{Epipolar coordinates on the sphere}\label{sec:epipolar}
+
+With a fixed head, every epipolar plane contains the baseline, the head's $X$ axis. A head-frame direction
+$\vb{d}$ is therefore best described by two angles:
+\begin{equation}\label{eq:epi}
+\vartheta = \arccos(d_x), \qquad \varphi = \atantwo(d_y,\, -d_z).
+\end{equation}
+$\vartheta$ is the angle from the baseline and $\varphi$ picks the epipolar plane, a rotation about the
+baseline. Two rays that see the same point share $\varphi$, and their parallax is
+$\delta = \vartheta_R - \vartheta_L > 0$. Unlike image disparity, these coordinates are defined over the whole
+sphere, so they work for every sensor and every gaze.
+
+\subsection{Triangulation and inverse depth}\label{sec:triang}
+
+In the triangle formed by the two eye centres and the point, the law of sines gives the distance from the left
+eye exactly:
+\begin{equation}\label{eq:lawsines}
+r_L = b\,\frac{\sin\vartheta_R}{\sin(\vartheta_R - \vartheta_L)}, \qquad \vb{X} = \vb{c}_L + r_L\,\vb{d}_L .
+\end{equation}
+For small parallax, $\sin\delta \approx \delta$ and $\vartheta_R \approx \vartheta_L = \vartheta$, so inverse
+depth is linear in parallax:
+\begin{equation}\label{eq:invdepth}
+\rho = \frac{1}{r} \approx \frac{\delta}{b\,\sin\vartheta}, \qquad
+\sigma_\rho \approx \frac{\sigma_\delta}{b\,\sin\vartheta}, \qquad
+\sigma_r \approx r^2\,\sigma_\rho .
+\end{equation}
+This is why the stereo field measures \textbf{inverse depth} with a variance: its error is the parallax error
+scaled by a constant. A worked example: with $b = 63$\,mm, a point straight ahead ($\vartheta = 90^\circ$) and a
+parallax error of one foveal sample, $\sigma_\delta = 0.05^\circ$, the inverse-depth error is
+0.014\,m$^{-1}$, which at 2.7\,m is $\pm 10$\,cm. That is the scale fov-3d-vision measured where the fovea had
+looked (0.015--0.019\,m$^{-1}$, 10--14\,cm at 2.7\,m~\cite{fov3dC}). Depth precision falls with the square of
+distance, and nothing can be measured along the baseline, where $\sin\vartheta = 0$.
+
+When the two rays come from a real matcher they rarely meet exactly. The framework then takes the midpoint of
+their closest approach: with $\vb{w} = \vb{c}_L - \vb{c}_R$ and $\kappa = \vb{d}_L\cdot\vb{d}_R$,
+\begin{equation}\label{eq:midpoint}
+s = \frac{\kappa\,(\vb{d}_R\cdot\vb{w}) - \vb{d}_L\cdot\vb{w}}{1-\kappa^2}, \quad
+t = \frac{\vb{d}_R\cdot\vb{w} - \kappa\,(\vb{d}_L\cdot\vb{w})}{1-\kappa^2}, \quad
+\vb{X} = \tfrac12\bigl[(\vb{c}_L + s\,\vb{d}_L) + (\vb{c}_R + t\,\vb{d}_R)\bigr],
+\end{equation}
+and the gap between the two closest points is a useful check on the match. What happens to the points afterwards
+(fusion into a surfel map at 12\,mm, the coverage sphere, the gaze policy) is the business of the code that
+consumes the record, not of the rendering framework.
+
+% ================================================================================================
+\section{Sampling and noise}\label{sec:noise}
+
+Every pixel the framework returns is a Monte Carlo estimate of the average radiance over that pixel's footprint.
+Its noise falls as one over the square root of the samples per pixel, and the settings are chosen so that this
+statement stays exactly true.
+
+\subsection{Monte Carlo error}\label{sec:mc}
+
+Cycles estimates a pixel by averaging $n$ independent light paths, $v = \frac1n\sum_j L_j$. The estimate is
+unbiased and its standard deviation falls as
+\begin{equation}\label{eq:mc}
+\sigma_v(n) = \frac{\sigma_1}{\sqrt{n}},
+\end{equation}
+where $\sigma_1$ is the spread of a single path, which depends on the scene's lighting and materials. Sensing cost
+is therefore controlled by one number, the samples per pixel (spp): 64 for a fixation at \code{small}, 256 at
+\code{full}. Two Cycles features would break the $1/\sqrt{n}$ law and are always off for measurement: adaptive
+sampling, which stops some pixels early, and denoising, which mixes neighbouring pixels.
+
+\subsection{The box filter makes a pixel a footprint average}\label{sec:box}
+
+With a box pixel filter of width 1, every path for a pixel starts at a uniformly random point inside that pixel's
+square on the raster, and contributes only to that pixel. Through the sensor's pixel-to-ray map the square
+becomes the pixel's footprint $\Omega_i$ on the sphere, so the pixel estimates
+\begin{equation}\label{eq:box}
+v_i \approx \frac{1}{\omega_i}\int_{\Omega_i} L(\vb{d})\,d\Omega .
+\end{equation}
+The approximation is only that sampling is uniform over the raster square rather than over solid angle, which
+differs little within one pixel. This is why each record entry carries its footprint $\omega_i$: a foveated
+sample covering $151\,s_0^2$ in the periphery is compared with a reference by averaging the reference over the
+same patch of sphere. Wider filters, such as Blackman--Harris, spread a path over neighbouring pixels and break
+this identity; they are used only for previews.
+
+\subsection{References must be quieter than what they judge}\label{sec:refs}
+
+A reference that is as noisy as the fixation it judges would hide the fixation's error in its own.
+fov-3d-vision's decision D7~\cite{fov3dDec} requires the reference's relative noise to be at most a third of the
+fixation's. With equal per-path spread that means
+\begin{equation}\label{eq:d7}
+\sqrt{\frac{n_{\mathrm{fix}}}{n_{\mathrm{ref}}}} \le \frac13
+\quad\Longleftrightarrow\quad n_{\mathrm{ref}} \ge 9\,n_{\mathrm{fix}} .
+\end{equation}
+The profiles exceed it: 1024 against 64\,spp at \code{small} ($16\times$), 8192 against 256 at \code{full}
+($32\times$). The price is time. A \code{full} reference panorama took 32--36 minutes on an RTX~4090, against
+about 270\,ms for a foveated pair, so references are rendered once per scene, pinned by checksum and kept.
+
+\subsection{Seeds}\label{sec:seeds}
+
+The random sequence of a render is set by its seed. The two eyes always use different seeds (2111 and 2112 by
+default) so their noise is independent; identical noise in both eyes would look like a perfect match and bias the
+stereo. Blender files can animate the seed (the Classroom does), so the framework removes such animation before
+rendering and checks after each render that the seed it set is the one used.
+
+Two renders of the same look with different seeds measure the noise directly. Their difference has variance
+$2\sigma^2$, so
+\begin{equation}\label{eq:noise}
+\hat\sigma^2 = \tfrac12\,\Var\!\left(v^{(s)} - v^{(s')}\right).
+\end{equation}
+This noise floor sets the thresholds of the framework's checks, rather than a fixed constant (decision
+D10~\cite{fov3dDec}). One limit applies: on OptiX the same seed does not give bit-identical images, so two
+conditions that must see identical noise are run on one saved observation rather than two renders.
+
+% ================================================================================================
+\section{Using the framework}\label{sec:api}
+
+A program opens a \code{Session} on a scene, chooses a sensor and a gaze, and asks for a \code{look}; it gets back
+one \code{SampleRecord} per eye. Everything else in this section is a variation on those three calls.
+
+\subsection{A first look}\label{sec:first}
+
+\begin{lstlisting}[language=Python]
+from fov3d.rendering import Session, RenderConfig, Rig, Gaze, sensors
+
+cfg = RenderConfig(profile="small", device="OPTIX")      # build on small, report on full
+rig = Rig(ipd_m=0.063, roll="upright")
+
+with Session("scenes/classroom/classroom_eye.blend", cfg, rig=rig) as s:
+    eye = sensors.Foveated(E2_deg=2.0, e_max_deg=45.0)      # s0 comes from the profile
+    look = s.look(eye, eyes=("L", "R"), gaze=Gaze.verged_point([0.4, 2.1, 1.1]))
+    L, R = look.records
+    print(L.n_samples, L.direction.shape, L.footprint_sr.sum())
+\end{lstlisting}
+
+\code{Session} starts Blender in the background, opens the scene once and keeps it open; each \code{look} is one
+request to it, and the context manager stops it. Inside a script that already runs in Blender,
+\code{Session.in\_process(cfg, rig=rig)} gives the same object without a second process.
+
+\subsection{The main objects}\label{sec:objects}
+
+\begin{table}[!htbp]
+\centering\footnotesize
+\begin{tabularx}{\textwidth}{@{}>{\cell}p{2.1cm} >{\cell}p{6.6cm} L@{}}
+\toprule
+Object & Made by & What it holds or does \\
+\midrule
+\code{RenderConfig} & \code{RenderConfig(profile, device, device\_policy, seed\_policy, color, exr\_codec)} &
+  the frozen Cycles settings of Section~\ref{sec:noise}; \code{small} or \code{full} fixes spp and spacing \\
+\code{Rig} & \code{Rig(ipd\_m, roll)} & baseline and roll convention (Section~\ref{sec:rig}); \code{roll} is
+  \code{"upright"} or \code{"baseline\_projected"} \\
+\code{Gaze} & \code{Gaze.yaw\_pitch(psi, theta, vergence\_m=2.1)}, \code{Gaze.verged\_point(P)},
+  \code{Gaze.per\_eye(L=(psi, theta), R=(psi, theta))} & where the eyes point, in degrees and metres
+  (Sections~\ref{sec:gaze}--\ref{sec:vergence}) \\
+sensors & \code{sensors.Foveated(E2\_deg, e\_max\_deg, s0\_deg=None)}, \code{sensors.Perspective(core\_fov\_deg=12)},
+  \code{sensors.Panorama(preset="preview360")}, \code{sensors.ReferenceView(width, height, half\_fov\_x\_deg)} &
+  the camera model; \code{.model} works without Blender \\
+\code{Session} & \code{Session(blend, cfg, rig=rig, access="observation")} & the scene, the render server and the
+  truth boundary \\
+\code{Look} & \code{session.look(sensor, eyes, gaze, spp=None, seeds=None)} & the request, \code{meta}, and
+  \code{.records} \\
+\code{SampleRecord} & inside a \code{Look}, or \code{SampleRecord.load(path)} & one eye's samples
+  (Section~\ref{sec:record}) \\
+\bottomrule
+\end{tabularx}
+\caption{The objects of the Python API.}\label{tab:api}
+\end{table}
+
+Each sensor's \code{.model} answers the geometric questions of Sections~\ref{sec:warp}--\ref{sec:sensors} in plain
+numpy, so analysis code can use it on any machine:
+
+\begin{lstlisting}[language=Python]
+m = sensors.Foveated(E2_deg=2.0, e_max_deg=45.0).model(profile="full")
+m.raster_size                  # (253, 253)
+dirs, omega, valid = m.rays()  # camera-frame directions, footprints (sr), disc mask
+uv = m.pixel_of(dirs[valid])   # inverse map, used by oracle correspondence
+\end{lstlisting}
+
+\subsection{The record and the truth boundary}\label{sec:record}
+
+A \code{SampleRecord} holds one entry per valid sample. Its observation fields are \code{origin} (the eye
+centre), \code{direction}, \code{value} (linear RGB radiance), \code{footprint\_sr}, \code{raster\_index}, and the
+labels \code{eye}, \code{look\_id} and \code{sensor}. Its oracle fields are \code{position\_w},
+\code{distance\_m} (infinite on a miss) and \code{instance\_id} (0 on a miss). Helpers convert between views:
+\code{rec.as\_raster("value")} rebuilds the image, and \code{rec.direction\_head} and \code{rec.epipolar()} give
+head-frame directions and the angles $(\vartheta,\varphi)$ of Section~\ref{sec:epipolar}.
+
+The session's \code{access} decides who may see what. With \code{access="observation"}, the default, oracle fields
+are not loaded and reading one raises an error, so a learning observer cannot cheat by accident. An experiment
+that declares oracle correspondence or segmentation opens the session with \code{access="oracle"}, and that
+choice is written into every look's \code{meta.json}. References are a third tier:
+\code{session.reference(eye="L")} renders the panorama of Section~\ref{sec:pano} into an
+\code{evaluation\_only/} folder that an observer session refuses to open.
+
+\subsection{Worked example: inverse depth from oracle stereo}\label{sec:ex-stereo}
+
+This example implements Sections~\ref{sec:oracle}--\ref{sec:triang} on one perspective pair.
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[language=Python]
+import numpy as np
+
+with Session(blend, RenderConfig(profile="full"), rig=Rig(roll="baseline_projected"),
+             access="oracle") as s:
+    look = s.look(sensors.Perspective(), eyes=("L", "R"),
+                  gaze=Gaze.yaw_pitch(10, -5, vergence_m=2.1))
+    L, R = look.records
+    iL, iR = look.oracle_matches(core_only=True)   # visible in both eyes (Sec. 6.2)
+    thL, phL = L.epipolar(iL)
+    thR, phR = R.epipolar(iR)
+    assert np.allclose(phL, phR, atol=1e-6)        # same epipolar plane
+    rL = look.rig.baseline_m * np.sin(thR) / np.sin(thR - thL)   # law of sines (Sec. 6.4)
+    err = rL - L.distance_m[iL]    # zero up to round-off: a check, not a result
+\end{lstlisting}
+\end{minipage}
+
+Replacing \code{look.oracle\_matches} with a real matcher's output, and keeping \code{L.distance\_m} only for
+scoring, turns the same lines into a stereo evaluation.
+
+\subsection{Worked example: an active loop}\label{sec:ex-loop}
+
+The framework renders; the loop's memory and policy are the student's. A minimal loop:
+
+\begin{lstlisting}[language=Python]
+with Session(blend, RenderConfig(profile="small"), access="oracle") as s:
+    eye = sensors.Foveated(E2_deg=2.0, e_max_deg=45.0)
+    gaze, memory = Gaze.yaw_pitch(0, 0, vergence_m=2.0), MyMemory()
+    for k in range(50):
+        look = s.look(eye, eyes=("L", "R"), gaze=gaze)
+        memory.update(measure(look))     # fixate -> reconstruct -> update memory
+        gaze = my_policy(memory)         # saccade
+        if gaze is None:                 # nothing left worth looking at
+            break
+\end{lstlisting}
+
+Because every sensor returns the same record, changing \code{eye} to \code{sensors.Perspective()} is the only edit
+needed to compare the two sensors in the same loop. Compare them at equal cost:
+\code{eye.model(profile).rays\_per\_eye} gives 50{,}269 rays for the foveated sensor and 409{,}600 for the
+perspective one at \code{full}, so equal rays means about eight foveated looks per perspective look.
+
+\subsection{Requests and the command line}\label{sec:cli}
+
+Every \code{look} is serialised as a JSON request (schema \code{fov3d-render-request-v1}) holding the sensor and
+its parameters, the eyes, the gaze, the roll, spp, seeds, passes and the output folder. Each look's folder holds
+the request, a \code{meta.json} with the poses, the settings Cycles actually used and the timings, the raw EXR per
+eye and the records. The same requests can be issued from a shell:
+
+\begin{lstlisting}[language=bash]
+fov3d-render look --blend scene.blend --sensor foveated --eyes L R \
+    --point 0.4 2.1 1.1 --profile full --out runs/demo/f0000
+fov3d-render panorama --blend scene.blend --preset preview360 --eye L \
+    --profile small --out previews/ref_L
+fov3d-render check --blend scene.blend      # the checks of Sec. 9 on a new scene
+\end{lstlisting}
+
+% ================================================================================================
+\section{Validation}\label{sec:checks}
+
+Every layer ships a check with a known answer and a control: a deliberately broken input that the check must
+reject, because a check that cannot fail tests nothing. A new scene is accepted only when all checks pass on it
+(\code{fov3d-render check}). Table~\ref{tab:checks} lists them.
+
+\begin{table}[!htbp]
+\centering\footnotesize
+\begin{tabularx}{\textwidth}{@{}>{\cell}p{2.3cm} >{\cell}p{2.0cm} L >{\cell}p{3.6cm}@{}}
+\toprule
+Check & Layer & Known answer & Control that must fail \\
+\midrule
+Settings readback & configuration & samples, seed, adaptive sampling and time limit equal the request after every
+  render & animate \code{cycles.samples} in the file \\
+Scene sanity & scene & no holes or back-faces seen from the eye; floor and ceiling at the expected depth below
+  and above the eye & a scene with a wall removed \\
+Pose agreement & rig & the three historical pose formulas agree to $10^{-9}$ on a grid of gazes & flip the yaw
+  sign in one \\
+Roll frame & rig & baseline-projected roll keeps image $+X$ on the baseline at extreme gazes & upright roll at
+  pitch $-89.9^\circ$ \\
+Warp & foveated & rendered ray directions match the numpy model of Section~\ref{sec:raster} & perturb $E_2$ by
+  1\% \\
+Footprint sum & every sensor & foveated: the cone's solid angle $2\pi(1 - \cos\emax)$; panorama: $4\pi$ & drop
+  the $\cos\beta$ factor \\
+Projection & perspective & world points project to their pixels within 0.002 pixel & lens off by 1\% \\
+Ray-cast truth & perspective, panorama & Position within 0.02\,mm of an independent ray cast & move the eye
+  1\,mm \\
+Equirect convention & panorama & Position directions match $(\lambda,\beta)$ of Section~\ref{sec:pano} & swap $u$
+  and $v$ \\
+Range source & record & range from Position equals the Depth pass where Depth is a ray length & compare with a
+  perspective Depth pass \\
+Instance ids & record & Object Index equals the ray-cast object at sampled pixels & renumber an object after
+  rendering \\
+Noise and seeds & engine & the two eyes use different seeds; noise falls as $1/\sqrt{n}$ & render both eyes
+  with one seed \\
+Loud failure & server & a failing request writes \code{fail-NNNN.json} and the process exits 1 & catch the
+  error without exiting \\
+\bottomrule
+\end{tabularx}
+\caption{Known-answer checks and their controls.}\label{tab:checks}
+\end{table}
+
+The check thresholds come from the measured noise floor of Section~\ref{sec:seeds} and from the scene's contrast,
+not from fixed constants. All checks except the noise floor are designed to run in under ten seconds on the
+\code{small} profile.
+
+% ================================================================================================
+\section{Limitations and further reading}\label{sec:limits}
+
+The framework simulates a controlled observer, not a real one; its limits are the price of an exact oracle.
+\begin{itemize}
+\item \textbf{Fixed head.} Eyes rotate, the head does not translate, so surfaces hidden from the head origin are
+  never targets. Self-occluded surfaces need head motion, which fov-3d-vision tested only as a prescribed lateral
+  move (FSG7a).
+\item \textbf{First-hit truth.} Position and Object Index describe the first surface a ray meets. For glass,
+  cut-out alpha, volumes or emitters this differs from what the pixel shows; such objects are flagged when a
+  scene is opened, and each experiment decides whether to exclude them.
+\item \textbf{Static, synthetic scenes.} No moving objects, no sensor model beyond path-traced radiance at a
+  chosen spp, no real camera.
+\item \textbf{No physiological torsion.} Roll follows one of two engineering conventions
+  (Section~\ref{sec:roll}), not the torsion of a real eye.
+\item \textbf{Back-ends and repeatability.} The OSL camera is verified on OptiX and on CPU; other GPU back-ends
+  are untested. OptiX renders are not bit-reproducible, so exact pairing of conditions reuses saved
+  observations.
+\item \textbf{Reference cost.} Uniform references at foveal spacing take about half an hour per scene at the
+  \code{full} profile, so they are rendered once and kept.
+\end{itemize}
+
+\paragraph{Further reading.} The decisions behind the numbers in this report, each with what would overturn it,
+are in fov-3d-vision's \code{DECISIONS.md}~\cite{fov3dDec}. The warp's derivation and its first measurement are
+in step A3~\cite{fov3dA3}, and the active loop's results in the Phase C summary~\cite{fov3dC}. The perspective
+explorer's architecture is documented in f3d-vision~\cite{f3dArch}. The sequence of reports from the laboratory
+is summarised in TR-09-2026~\cite{tr09} and TR-11-2026~\cite{tr11}.
+
+% ================================================================================================
+\begin{thebibliography}{9}
+\bibitem{tr09} Luiz Velho and Claude. ``Experiments on Active 3D Vision''. Technical Report TR-09-2026, VISGRAF
+  Lab -- IMPA, 2026.
+\bibitem{tr11} Luiz Velho and Claude. ``Active Foveal 3-D Vision Playground''. Technical Report TR-11-2026,
+  VISGRAF Lab -- IMPA, 2026.
+\bibitem{fov3d} VISGRAF Lab. \emph{fov-3d-vision}: foveated omnidirectional rendering and 3D reconstruction.
+  \url{https://github.com/visgraf/fov-3d-vision}
+\bibitem{fov3dDec} VISGRAF Lab. fov-3d-vision, \code{DECISIONS.md}.
+  \url{https://github.com/visgraf/fov-3d-vision/blob/main/DECISIONS.md}
+\bibitem{fov3dA3} VISGRAF Lab. fov-3d-vision, step A3: the foveated camera.
+  \url{https://github.com/visgraf/fov-3d-vision/blob/main/docs/a3-foveated-camera.md}
+\bibitem{fov3dC} VISGRAF Lab. fov-3d-vision, Phase C summary.
+  \url{https://github.com/visgraf/fov-3d-vision/blob/main/docs/phase-c-summary.md}
+\bibitem{f3d} VISGRAF Lab. \emph{f3d-vision}: the Active Foveal Playground.
+  \url{https://github.com/visgraf/f3d-vision}
+\bibitem{f3dArch} VISGRAF Lab. f3d-vision, Greedy Foveal Playground architecture.
+  \url{https://github.com/visgraf/f3d-vision/blob/main/docs/architecture/greedy-foveal-playground.md}
+\end{thebibliography}
 
 \end{document}
