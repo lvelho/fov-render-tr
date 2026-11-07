@@ -1,7 +1,7 @@
 % Foveated Stereo Rendering in Blender: A Unified Sensor Framework
 % VISGRAF Lab technical report, course reading. Draft 5 November 2026.
 % Source of truth for the text: the Claude Doc of the same title. Build: pdflatex twice.
-% The report describes fov3d.rendering as if implemented; class and command names follow the design plan.
+% The report describes fov_render (visgraf/fov-render) as if implemented; class and command names follow the design plan.
 \documentclass[11pt,a4paper]{article}
 
 \usepackage[T1]{fontenc}
@@ -80,7 +80,7 @@
 \maketitle
 
 \begin{abstract}
-\noindent A camera samples a scene uniformly; an eye does not. This report describes \code{fov3d.rendering}, a
+\noindent A camera samples a scene uniformly; an eye does not. This report describes \code{fov\_render}, a
 framework that turns Blender's Cycles path tracer into a binocular, gaze-directed observer. Two eyes on a fixed
 head can each carry one of four sensors: a log-polar foveated camera, a perspective tangent-plane camera, an
 equirectangular panorama and a wide reference view. Every look, whatever the sensor, returns the same record: one
@@ -201,7 +201,7 @@ sends a request, one handler inside Blender renders it, and one record per eye c
   \draw[arr] (13.3,-7.1) -- (13.3,-8.0) node[midway, lab, xshift=2pt] {references};
   \draw[arr] (5.2,-9.45) -- (5.2,-10.3);
 \end{tikzpicture}
-\caption{Architecture of \code{fov3d.rendering}: two entry points, one request handler, four sensors and one
+\caption{Architecture of \code{fov\_render}: two entry points, one request handler, four sensors and one
 record per eye. The foveated sensor is highlighted because it is the one sensor no off-the-shelf camera
 provides.}\label{fig:arch}
 \end{figure}
@@ -627,7 +627,7 @@ one \code{SampleRecord} per eye. Everything else in this section is a variation 
 \subsection{A first look}\label{sec:first}
 
 \begin{lstlisting}[language=Python]
-from fov3d.rendering import Session, RenderConfig, Rig, Gaze, sensors
+from fov_render import Session, RenderConfig, Rig, Gaze, sensors
 
 cfg = RenderConfig(profile="small", device="OPTIX")      # build on small, report on full
 rig = Rig(ipd_m=0.063, roll="upright")
@@ -746,17 +746,17 @@ perspective one at \code{full}, so equal rays means about eight foveated looks p
 
 \subsection{Requests and the command line}\label{sec:cli}
 
-Every \code{look} is serialised as a JSON request (schema \code{fov3d-render-request-v1}) holding the sensor and
+Every \code{look} is serialised as a JSON request (schema \code{fov-render-request-v1}) holding the sensor and
 its parameters, the eyes, the gaze, the roll, spp, seeds, passes and the output folder. Each look's folder holds
 the request, a \code{meta.json} with the poses, the settings Cycles actually used and the timings, the raw EXR per
 eye and the records. The same requests can be issued from a shell:
 
 \begin{lstlisting}[language=bash]
-fov3d-render look --blend scene.blend --sensor foveated --eyes L R \
+fov-render look --blend scene.blend --sensor foveated --eyes L R \
     --point 0.4 2.1 1.1 --profile full --out runs/demo/f0000
-fov3d-render panorama --blend scene.blend --preset preview360 --eye L \
+fov-render panorama --blend scene.blend --preset preview360 --eye L \
     --profile small --out previews/ref_L
-fov3d-render check --blend scene.blend      # the checks of Sec. 9 on a new scene
+fov-render check --blend scene.blend      # the checks of Sec. 9 on a new scene
 \end{lstlisting}
 
 % ================================================================================================
@@ -764,7 +764,7 @@ fov3d-render check --blend scene.blend      # the checks of Sec. 9 on a new scen
 
 Every layer ships a check with a known answer and a control: a deliberately broken input that the check must
 reject, because a check that cannot fail tests nothing. A new scene is accepted only when all checks pass on it
-(\code{fov3d-render check}). Table~\ref{tab:checks} lists them.
+(\code{fov-render check}). Table~\ref{tab:checks} lists them.
 
 \begin{table}[!htbp]
 \centering\footnotesize
