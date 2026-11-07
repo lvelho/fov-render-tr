@@ -35,7 +35,7 @@
 \IfFileExists{techrep-ic.sty}{%
   \usepackage{techrep-ic}%
   \newcommand{\MakeVisgrafCover}{%
-    \TRNumber{XX}   % <-- set the report number (printed as TR-26-XX)
+    \TRNumber{14}   % <-- set the report number (printed as TR-26-XX)
     \TRYear{26}     % two digits
     \TRMonth{11}    % numeric 01-12
     \TRAuthor{Luiz Velho, Claude}
@@ -805,6 +805,8 @@ Loud failure & server & a failing request writes \code{fail-NNNN.json} and the p
 The check thresholds come from the measured noise floor of Section~\ref{sec:seeds} and from the scene's contrast,
 not from fixed constants. All checks except the noise floor are designed to run in under ten seconds on the
 \code{small} profile.
+
+\pagebreak
 
 % ================================================================================================
 \section{Limitations and further reading}\label{sec:limits}
