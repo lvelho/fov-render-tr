@@ -1,7 +1,8 @@
 % Foveated Stereo Rendering in Blender: A Unified Sensor Framework
-% VISGRAF Lab technical report, course reading. Draft 5 November 2026.
-% Source of truth for the text: the Claude Doc of the same title. Build: pdflatex twice.
-% The report describes fov3d.rendering as if implemented; class and command names follow the design plan.
+% VISGRAF Lab technical report, course reading. Draft 5 November 2026, revised 8 November 2026.
+% Build: pdflatex twice.
+% Revision of 8 November 2026: the framework is implemented as visgraf/fov-render (package fov_render,
+% command fov-render); names, signatures, the command line and the checks follow the repository.
 \documentclass[11pt,a4paper]{article}
 
 \usepackage[T1]{fontenc}
@@ -27,7 +28,7 @@
 \hypersetup{colorlinks=true,linkcolor=black!70!blue,citecolor=black!70!blue,urlcolor=black!70!blue,
   pdftitle={Foveated Stereo Rendering in Blender: A Unified Sensor Framework},
   pdfauthor={Luiz Velho, with Claude (Anthropic)},
-  pdfsubject={VISGRAF technical report, draft 5 November 2026}}
+  pdfsubject={VISGRAF technical report, revised 8 November 2026}}
 
 % ---------------------------------------------------------------- VISGRAF cover
 % The VISGRAF TR cover comes from techrep-ic.sty. Where the style is available the cover
@@ -72,7 +73,8 @@
 \title{\textbf{Foveated Stereo Rendering in Blender:\\A Unified Sensor Framework}}
 \author{Luiz Velho\\[2pt] \normalsize with Claude (Anthropic)\\[2pt]
   \normalsize VISGRAF Lab, IMPA}
-\date{\normalsize Technical Report \textperiodcentered{} course reading \textperiodcentered{} draft 5 November 2026}
+\date{\normalsize Technical Report \textperiodcentered{} course reading \textperiodcentered{} revised 8 November 2026\\[2pt]
+  \normalsize Software: \url{https://github.com/visgraf/fov-render}}
 
 \begin{document}
 
@@ -80,18 +82,23 @@
 \maketitle
 
 \begin{abstract}
-\noindent A camera samples a scene uniformly; an eye does not. This report describes \code{fov3d.rendering}, a
-framework that turns Blender's Cycles path tracer into a binocular, gaze-directed observer. Two eyes on a fixed
+\noindent A camera samples a scene uniformly; an eye does not. This report describes \emph{fov-render}, a
+framework that turns Blender's Cycles path tracer into a binocular, gaze-directed observer. It is open source
+(CC0) at \url{https://github.com/visgraf/fov-render}~\cite{fovrender}: a Python package, \code{fov\_render},
+and a command line, \code{fov-render}. Two eyes on a fixed
 head can each carry one of four sensors: a log-polar foveated camera, a perspective tangent-plane camera, an
 equirectangular panorama and a wide reference view. Every look, whatever the sensor, returns the same record: one
 ray per sample with its direction, radiance, solid-angle footprint and, as oracle, the surface it hit. The
 framework unifies two research code bases from the VISGRAF laboratory, fov-3d-vision~\cite{fov3d} and
-f3d-vision~\cite{f3d}.
+f3d-vision~\cite{f3d}, and was built by migrating their rendering code into one package under checks against
+the code it replaced.
 
-The reader should come away with four things: why foveated, active sampling is worth simulating
+The reader should come away with five things: why foveated, active sampling is worth simulating
 (Section~\ref{sec:motivation}); how the framework is layered (Section~\ref{sec:arch}); the geometry and sampling
-mathematics behind each sensor and each measurement (Sections~\ref{sec:rig}--\ref{sec:noise}); and how to drive
-it from Python (Section~\ref{sec:api}). Implementation detail is kept at the level of modules and interfaces.
+mathematics behind each sensor and each measurement (Sections~\ref{sec:rig}--\ref{sec:noise}); how to drive it
+from Python and from the shell, and how to bring in a scene of one's own (Section~\ref{sec:api}); and how its
+correctness is checked (Sections~\ref{sec:checks}--\ref{sec:built}). Implementation detail is kept at the level
+of modules and interfaces; the code is the reference for the rest.
 \end{abstract}
 
 % ================================================================================================
@@ -145,6 +152,25 @@ Three working rules carry over from both projects and shape the design: every nu
 labelled an estimate; every component ships a check that can fail; and data the observer may see is kept apart
 from data only the evaluator may see.
 
+\subsection{The software}\label{sec:software}
+
+The framework is the repository \code{visgraf/fov-render}~\cite{fovrender}, released under CC0~1.0 like the two
+code bases it comes from. It needs Blender~5.2.1 LTS (Cycles), and either the Blender binary or the matching
+\code{bpy} wheel for Python~3.13; the numpy half runs without Blender. It installs as a package or is used as a
+git submodule:
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[language=bash]
+git clone https://github.com/visgraf/fov-render
+cd fov-render
+pip install -e ".[bpy,checks]"     # with the bpy wheel and OpenEXR; "." alone: numpy only
+fov-render selftest --device CPU   # the package's own checks (Sec. 9)
+\end{lstlisting}
+\end{minipage}
+The tag \code{v0.1.0} marks the end of the migration from the two code bases (Section~\ref{sec:built}); the
+command line of Section~\ref{sec:cli} came after it (issue~\#18). The repository's \code{README.md} is the
+user's guide, \code{docs/PLAN.md} records the design decisions and \code{docs/HISTORY.md} the migration. This
+report describes the design and its reasons; where the two differ in a detail, the repository is right.
+
 % ================================================================================================
 \section{Architecture}\label{sec:arch}
 
@@ -191,7 +217,7 @@ sends a request, one handler inside Blender renders it, and one record per eye c
      {\footnotesize\color{black!65} observation: origin, direction, value, footprint\\
       oracle (when declared): position, distance, instance}};
   \node[box, minimum width=4.4cm, minimum height=1.45cm, text width=4.1cm] (eval) at (11.1,-8.0)
-    {\textbf{\code{evaluation\_only/}}\\ {\footnotesize\color{black!65} never read by\\ the observer}};
+    {\textbf{References}\\ {\footnotesize\color{black!65} panoramas at foveal\\ spacing, for evaluation}};
   \node[box, minimum width=10.4cm, minimum height=1.15cm, text width=10.1cm] (yours) at (0,-10.3)
     {\textbf{Your code}\\ {\footnotesize\color{black!65} matcher, memory, gaze policy}};
   % arrows
@@ -201,8 +227,8 @@ sends a request, one handler inside Blender renders it, and one record per eye c
   \draw[arr] (13.3,-7.1) -- (13.3,-8.0) node[midway, lab, xshift=2pt] {references};
   \draw[arr] (5.2,-9.45) -- (5.2,-10.3);
 \end{tikzpicture}
-\caption{Architecture of \code{fov3d.rendering}: two entry points, one request handler, four sensors and one
-record per eye. The foveated sensor is highlighted because it is the one sensor no off-the-shelf camera
+\caption{Architecture of fov-render (package \code{fov\_render}): two entry points, one request handler, four
+sensors and one record per eye; the command line of Section~\ref{sec:cli} is a third caller of \code{Session}. The foveated sensor is highlighted because it is the one sensor no off-the-shelf camera
 provides.}\label{fig:arch}
 \end{figure}
 
@@ -221,15 +247,43 @@ Each layer has one job:
   pixel's footprint, and a Blender \emph{builder} that creates the camera. Analysis code uses the model without
   Blender (Sections~\ref{sec:warp}--\ref{sec:sensors}).
 \item \textbf{Record.} Converts the rendered passes into a \code{SampleRecord}, one entry per valid sample, with
-  each field labelled as observation or oracle. References go to a separate \code{evaluation\_only/} area
-  (Section~\ref{sec:record}).
+  each field labelled as observation or oracle, behind an access gate (Section~\ref{sec:record}). References are
+  panorama looks rendered at foveal spacing and kept for evaluation.
 \item \textbf{Execution.} A \code{Session} either runs Blender as a persistent background server fed one JSON
-  request per look, or, inside a Blender script, calls the same handler directly (Section~\ref{sec:first}).
+  request per look, or, inside a Blender script, calls the same handler directly (Section~\ref{sec:first}). The
+  \code{fov-render} command line sends the same requests through a \code{Session} (Section~\ref{sec:cli}).
 \end{itemize}
 
 Two properties follow from this layout. The record does not depend on the sensor, so downstream code (a matcher,
 a map, a gaze policy) can switch sensors without change. And the observer's view and the evaluator's truth are
-separated by construction, not by convention.
+separated by construction, not by convention: an observation session cannot read an oracle field.
+
+In the repository the layers are modules (Table~\ref{tab:modules}). Everything that does not need Blender is
+plain numpy and runs anywhere; the Blender half lives in \code{fov\_render/bl/} and imports only \code{bpy},
+\code{mathutils}, numpy and the standard library.
+
+\begin{table}[!htbp]
+\centering\footnotesize
+\begin{tabularx}{\textwidth}{@{}>{\cell}p{4.3cm} L@{}}
+\toprule
+Module & What it holds \\
+\midrule
+\code{profiles}, \code{warp} & the \code{small} and \code{full} profiles; the log-polar warp of Section~\ref{sec:warp} \\
+\code{rig}, \code{geometry} & frames, gaze, vergence, roll (Section~\ref{sec:rig}); epipolar angles and
+  triangulation (Section~\ref{sec:geometry}) \\
+\code{sensors/} & the four sensor specs and their numpy models; the OSL shader of the foveated camera \\
+\code{record}, \code{exr\_lite} & \code{SampleRecord} and its access gate; a reader for uncompressed EXR files \\
+\code{request}, \code{session} & the JSON schemas and their validation; \code{Session}, \code{Look} \\
+\code{server}, \code{bl/handler} & the persistent render server and the request handler (Blender side) \\
+\code{bl/} & \code{config} (\code{RenderConfig}, presets), \code{engine}, \code{passes}, \code{cameras},
+  \code{scene} (opening, sanitising, numbering, audits, sanity), \code{eye\_scene} \\
+\code{cli}, \code{blcli}, \code{launch} & the \code{fov-render} command line and how it finds Blender \\
+\code{checks/} & the gates of Section~\ref{sec:checks}, with the known answers they compare against \\
+\bottomrule
+\end{tabularx}
+\caption{The package \code{fov\_render}. The Blender-side modules run in either interpreter: the Blender binary
+(\code{blender -b -P}) or Python with the \code{bpy} wheel.}\label{tab:modules}
+\end{table}
 
 % ================================================================================================
 \section{Coordinate frames and the binocular rig}\label{sec:rig}
@@ -622,26 +676,33 @@ conditions that must see identical noise are run on one saved observation rather
 \section{Using the framework}\label{sec:api}
 
 A program opens a \code{Session} on a scene, chooses a sensor and a gaze, and asks for a \code{look}; it gets back
-one \code{SampleRecord} per eye. Everything else in this section is a variation on those three calls.
+one \code{SampleRecord} per eye. Everything else in this section is a variation on those three calls, from Python
+(Sections~\ref{sec:first}--\ref{sec:ex-loop}) or from the shell (Sections~\ref{sec:cli}--\ref{sec:newscene}).
+Every listing here runs against the repository.
 
 \subsection{A first look}\label{sec:first}
 
 \begin{lstlisting}[language=Python]
-from fov3d.rendering import Session, RenderConfig, Rig, Gaze, sensors
+from fov_render import Session, RenderConfig, Rig, Gaze, sensors
 
 cfg = RenderConfig(profile="small", device="OPTIX")      # build on small, report on full
 rig = Rig(ipd_m=0.063, roll="upright")
 
 with Session("scenes/classroom/classroom_eye.blend", cfg, rig=rig) as s:
     eye = sensors.Foveated(E2_deg=2.0, e_max_deg=45.0)      # s0 comes from the profile
-    look = s.look(eye, eyes=("L", "R"), gaze=Gaze.verged_point([0.4, 2.1, 1.1]))
+    look = s.look(eye, eyes=("L", "R"), gaze=Gaze.verged_point([0.4, 2.1, 1.1]),
+                  outputs=("exr", "records"))
     L, R = look.records
     print(L.n_samples, L.direction.shape, L.footprint_sr.sum())
 \end{lstlisting}
 
 \code{Session} starts Blender in the background, opens the scene once and keeps it open; each \code{look} is one
-request to it, and the context manager stops it. Inside a script that already runs in Blender,
-\code{Session.in\_process(cfg, rig=rig)} gives the same object without a second process.
+request to it, and the context manager stops it. Which Blender: \code{\$FOVRENDER\_BLENDER}, else
+\code{blender} on the \code{PATH}, else the current Python if it has the \code{bpy} wheel (\code{launcher=}
+chooses explicitly). Inside a script that already runs in Blender, \code{Session.in\_process(cfg, rig=rig)}
+gives the same object without a second process. A look writes its EXR files and \code{meta.json}; the records
+are written when \code{outputs} asks for them. With the calibration room on a CPU, the listing prints 12{,}492
+samples per eye at the \code{small} profile (Chat sandbox, issue~\#18).
 
 \subsection{The main objects}\label{sec:objects}
 
@@ -651,8 +712,9 @@ request to it, and the context manager stops it. Inside a script that already ru
 \toprule
 Object & Made by & What it holds or does \\
 \midrule
-\code{RenderConfig} & \code{RenderConfig(profile, device, device\_policy, seed\_policy, color, exr\_codec)} &
-  the frozen Cycles settings of Section~\ref{sec:noise}; \code{small} or \code{full} fixes spp and spacing \\
+\code{RenderConfig} & \code{RenderConfig(profile, device, device\_policy, spp, seed, color, exr\_codec, passes)},
+  or \code{preset(name, ...)} for a legacy path & the frozen Cycles settings of Section~\ref{sec:noise};
+  \code{small} or \code{full} fixes spp and spacing; \code{device\_policy="strict"} never falls back to the CPU \\
 \code{Rig} & \code{Rig(ipd\_m, roll)} & baseline and roll convention (Section~\ref{sec:rig}); \code{roll} is
   \code{"upright"} or \code{"baseline\_projected"} \\
 \code{Gaze} & \code{Gaze.yaw\_pitch(psi, theta, vergence\_m=2.1)}, \code{Gaze.verged\_point(P)},
@@ -661,10 +723,11 @@ Object & Made by & What it holds or does \\
 sensors & \code{sensors.Foveated(E2\_deg, e\_max\_deg, s0\_deg=None)}, \code{sensors.Perspective(core\_fov\_deg=12)},
   \code{sensors.Panorama(preset="preview360")}, \code{sensors.ReferenceView(width, height, half\_fov\_x\_deg)} &
   the camera model; \code{.model} works without Blender \\
-\code{Session} & \code{Session(blend, cfg, rig=rig, access="observation")} & the scene, the render server and the
-  truth boundary \\
-\code{Look} & \code{session.look(sensor, eyes, gaze, spp=None, seeds=None)} & the request, \code{meta}, and
-  \code{.records} \\
+\code{Session} & \code{Session(blend, cfg, rig, access="observation", head=None, instance\_ids="complete",
+  launcher="auto")} & the scene, the render server and the truth boundary; \code{instance\_ids} chooses how
+  objects reached through collection instances are numbered \\
+\code{Look} & \code{session.look(sensor, eyes, gaze, spp=None, seeds=None, out\_dir=None, outputs=("exr",))} &
+  the request, the response, \code{meta}, \code{exr} and \code{.records} \\
 \code{SampleRecord} & inside a \code{Look}, or \code{SampleRecord.load(path)} & one eye's samples
   (Section~\ref{sec:record}) \\
 \bottomrule
@@ -677,9 +740,10 @@ numpy, so analysis code can use it on any machine:
 
 \begin{lstlisting}[language=Python]
 m = sensors.Foveated(E2_deg=2.0, e_max_deg=45.0).model(profile="full")
-m.raster_size                  # (253, 253)
-dirs, omega, valid = m.rays()  # camera-frame directions, footprints (sr), disc mask
-uv = m.pixel_of(dirs[valid])   # inverse map, used by oracle correspondence
+m.shape                        # (253, 253)
+m.rays_per_eye                 # 50269
+r = m.rays()                   # r.direction (camera frame), r.footprint_sr, r.valid (the disc)
+rc, inside = m.pixel_of(r.direction[r.valid])   # inverse map: (row, col) and an inside mask
 \end{lstlisting}
 
 \subsection{The record and the truth boundary}\label{sec:record}
@@ -692,47 +756,57 @@ labels \code{eye}, \code{look\_id} and \code{sensor}. Its oracle fields are \cod
 head-frame directions and the angles $(\vartheta,\varphi)$ of Section~\ref{sec:epipolar}.
 
 The session's \code{access} decides who may see what. With \code{access="observation"}, the default, oracle fields
-are not loaded and reading one raises an error, so a learning observer cannot cheat by accident. An experiment
-that declares oracle correspondence or segmentation opens the session with \code{access="oracle"}, and that
-choice is written into every look's \code{meta.json}. References are a third tier:
-\code{session.reference(eye="L")} renders the panorama of Section~\ref{sec:pano} into an
-\code{evaluation\_only/} folder that an observer session refuses to open.
+are not loaded and reading one raises \code{AccessError}, so a learning observer cannot cheat by accident. An
+experiment that declares oracle correspondence or segmentation opens the session with \code{access="oracle"},
+and that choice is written into every look's \code{meta.json}. References are a third tier: a panorama look of
+Section~\ref{sec:pano} at foveal spacing, rendered once per scene and kept for evaluation. In the current version
+keeping them away from the observer is the experiment's job; a store that an observer session refuses to open is
+planned (Section~\ref{sec:limits}).
 
 \subsection{Worked example: inverse depth from oracle stereo}\label{sec:ex-stereo}
 
-This example implements Sections~\ref{sec:oracle}--\ref{sec:triang} on one perspective pair.
+This example implements Sections~\ref{sec:epipolar}--\ref{sec:triang} on one perspective pair: each left
+sample's oracle point is seen from both eye centres, and the law of sines gives its distance back.
 
 \noindent\begin{minipage}{\linewidth}
 \begin{lstlisting}[language=Python]
 import numpy as np
+from fov_render import geometry
 
-with Session(blend, RenderConfig(profile="full"), rig=Rig(roll="baseline_projected"),
+with Session(blend, RenderConfig(profile="full"), Rig(roll="baseline_projected"),
              access="oracle") as s:
     look = s.look(sensors.Perspective(), eyes=("L", "R"),
-                  gaze=Gaze.yaw_pitch(10, -5, vergence_m=2.1))
+                  gaze=Gaze.yaw_pitch(10, -5, vergence_m=2.1),
+                  outputs=("exr", "records"))
     L, R = look.records
-    iL, iR = look.oracle_matches(core_only=True)   # visible in both eyes (Sec. 6.2)
-    thL, phL = L.epipolar(iL)
-    thR, phR = R.epipolar(iR)
-    assert np.allclose(phL, phR, atol=1e-6)        # same epipolar plane
-    rL = look.rig.baseline_m * np.sin(thR) / np.sin(thR - thL)   # law of sines (Sec. 6.4)
-    err = rL - L.distance_m[iL]    # zero up to round-off: a check, not a result
+    hit = np.isfinite(L.distance_m)
+    P = L.position_w[hit].astype(float)        # oracle: what each left ray hit
+    # epipolar angles in the head frame (Sec. 6.3)
+    thL, phL = geometry.epipolar((P - L.origin) @ L.head_R_wh)
+    thR, phR = geometry.epipolar((P - R.origin) @ R.head_R_wh)
+    assert np.allclose(phL, phR, atol=1e-6)    # one epipolar plane
+    # the law of sines (Sec. 6.4)
+    rL, rR = geometry.triangulate_sine(thL, thR, s.rig.baseline_m)
+    err = rL - L.distance_m[hit]   # zero up to round-off: a check, not a result
 \end{lstlisting}
 \end{minipage}
 
-Replacing \code{look.oracle\_matches} with a real matcher's output, and keeping \code{L.distance\_m} only for
-scoring, turns the same lines into a stereo evaluation.
+On the calibration room at the \code{small} profile the largest \code{|err|} is $3\times10^{-7}$\,m, the
+float32 precision of the Position pass (Chat sandbox, CPU, issue~\#18). Visibility in the right eye
+(Section~\ref{sec:oracle}) is a further test on \code{R}: project \code{P} with the right sensor's
+\code{model.pixel\_of} and compare \code{R.distance\_m} there. Replacing the oracle point with a real matcher's
+right-eye ray, and keeping \code{L.distance\_m} only for scoring, turns the same lines into a stereo evaluation.
 
 \subsection{Worked example: an active loop}\label{sec:ex-loop}
 
 The framework renders; the loop's memory and policy are the student's. A minimal loop:
 
 \begin{lstlisting}[language=Python]
-with Session(blend, RenderConfig(profile="small"), access="oracle") as s:
+with Session(blend, RenderConfig(profile="small"), Rig(), access="oracle") as s:
     eye = sensors.Foveated(E2_deg=2.0, e_max_deg=45.0)
     gaze, memory = Gaze.yaw_pitch(0, 0, vergence_m=2.0), MyMemory()
     for k in range(50):
-        look = s.look(eye, eyes=("L", "R"), gaze=gaze)
+        look = s.look(eye, eyes=("L", "R"), gaze=gaze, outputs=("exr", "records"))
         memory.update(measure(look))     # fixate -> reconstruct -> update memory
         gaze = my_policy(memory)         # saccade
         if gaze is None:                 # nothing left worth looking at
@@ -746,65 +820,183 @@ perspective one at \code{full}, so equal rays means about eight foveated looks p
 
 \subsection{Requests and the command line}\label{sec:cli}
 
-Every \code{look} is serialised as a JSON request (schema \code{fov3d-render-request-v1}) holding the sensor and
-its parameters, the eyes, the gaze, the roll, spp, seeds, passes and the output folder. Each look's folder holds
-the request, a \code{meta.json} with the poses, the settings Cycles actually used and the timings, the raw EXR per
-eye and the records. The same requests can be issued from a shell:
+Every \code{look} is serialised as a JSON request (schema \code{fov-render-request-v1}) holding the sensor and its
+parameters, the eyes, the gaze, an optional rig override, spp, seeds, the output folder and what to write. The
+session itself is one more request, \code{fov-render-session-v1}: the scene, the \code{RenderConfig}, the rig, the
+access level and the Object Index numbering. Both are validated before anything renders, and a malformed one is
+refused with every reason at once. Each look's folder holds the request, a \code{meta.json} with the poses, the
+settings Cycles actually used and the timings, the raw EXR per eye and, when asked, the records. Between a
+\code{Session} and its server the requests travel through a queue folder (\code{req-NNNN.json} in,
+\code{done-NNNN.json} or \code{fail-NNNN.json} out), the protocol of f3d-vision's render server.
+
+The same requests can be issued from a shell with \code{fov-render}:
 
 \begin{lstlisting}[language=bash]
-fov3d-render look --blend scene.blend --sensor foveated --eyes L R \
-    --point 0.4 2.1 1.1 --profile full --out runs/demo/f0000
-fov3d-render panorama --blend scene.blend --preset preview360 --eye L \
-    --profile small --out previews/ref_L
-fov3d-render check --blend scene.blend      # the checks of Sec. 9 on a new scene
+fov-render look --blend scene_eye.blend --sensor foveated --eyes L R \
+    --point 0.4 2.1 1.1 --profile full --records --out runs/demo/f0000
+fov-render look --blend scene_eye.blend --sensor perspective --gaze 10 -5 --vergence 2.1 \
+    --seeds L=2111 R=2112 --out runs/demo/p0000
+fov-render panorama --blend scene_eye.blend --preset preview360 --eye C \
+    --profile small --out previews/ref_C
+fov-render requests --blend scene_eye.blend looks.json --out runs/demo
+fov-render info --blend scene_eye.blend
 \end{lstlisting}
+
+Sensor fields are passed as \code{-{}-param KEY=VALUE} (\code{E2\_deg=2.0 e\_max\_deg=45}); the gaze is one of
+\code{-{}-point}, \code{-{}-gaze YAW PITCH} with an optional \code{-{}-vergence}, \code{-{}-per-eye L=YAW,PITCH R=...}, or
+none, for a fixed look along the head. A \code{requests} file is a JSON list of looks, each with the request's
+fields; the scene is opened once for all of them. \code{info} prints the scene report as JSON: the file and its
+checksum, the head, the view layer that renders, the numbered objects and the material and image audits. A command-line look sends exactly the request
+\code{Session.look} sends, and the package's checks verify that the two give bit-identical images and records on
+the CPU (Section~\ref{sec:checks}). Every folder also gets \code{fov-render-run.json}: the command, the session,
+the server's ready answer and every response.
+
+The exit status follows one rule: \textbf{0} done; \textbf{1} a render, a check or Blender failed; \textbf{2} the
+arguments, a request or a scene specification were refused, every reason printed, and Blender not started.
+Blender's own \code{blender -b -P} exits 0 even when its script fails, so every Blender-side entry point of the
+package exits nonzero itself.
+
+\subsection{Bringing in a new scene}\label{sec:newscene}
+
+Any \code{.blend} file can be used once it has a head. The framework never edits the original: \code{fov-render
+eye} writes a copy with a camera named \code{EYE} at the head, and a JSON sidecar recording the source's
+checksum and the pose. The copy is saved next to the original so relative texture paths keep working. Then
+\code{info} shows what the framework sees in the file, a first scene gate drafts the scene's specification, and,
+once the draft has been read, the full gate runs against it:
+
+\begin{lstlisting}[language=bash]
+fov-render eye --blend shop.blend --out shop_eye.blend --from-camera --forward-m 1.5
+fov-render info --blend shop_eye.blend
+fov-render check --blend shop_eye.blend --only S1 S2 --write-spec shop.draft.json
+fov-render check --blend shop_eye.blend --spec shop.json --device OPTIX
+\end{lstlisting}
+
+\code{-{}-from-camera} places the head a given distance along the file's own camera, level, with its yaw:
+demonstration files are usually framed for one shot camera that stands at the edge of the set. In the Barbershop
+(Blender Studio, CC-BY) that camera stands 0.53\,m behind a wall (issue~\#4); in the Classroom f3d-vision measured
+a back-face fraction of 0.136 from the file's camera and 0.0038 from a head inside the room~\cite{f3d}.
+
+\code{fov-render check} runs the \emph{scene gate}, the checks that any file can run (Table~\ref{tab:scene}).
+What a scene is expected to give is its \emph{specification}, a small JSON file: the hole fraction allowed, the
+objects allowed to show back-faces, the nearest surface, the images known to be missing, the gazes to test.
+\code{-{}-write-spec} drafts one from what S1 and S2 measure: the missing images as found, the closed meshes that
+show back-faces as allowed, a hole limit of twice the measured fraction, at least 0.001 and at most the default
+0.02. A draft accepts the scene as it is, so it is read before it is kept; what it records is what a later change
+to the scene must keep. A specification with an unknown or empty expectation is refused. The repository keeps
+specifications for the calibration room, the Barbershop and the Classroom in \code{docs/scenes/}.
+
+\begin{table}[!htbp]
+\centering\footnotesize
+\begin{tabularx}{\textwidth}{@{}>{\cell}p{0.6cm} L >{\cell}p{5.0cm}@{}}
+\toprule
+& What is checked & Control that must fail \\
+\midrule
+S1 & the scene opens: the head from \code{EYE}, the view layer that renders, every renderable object numbered, the
+  missing images as expected & an expectation one image off \\
+S2 & a low-resolution panorama from the head: holes, back-faces only on allowed objects (closed meshes count, open
+  ones are reported), the nearest surface & every back-face counted, none allowed (when the scene has any) \\
+S3 & fov-3d-vision's \code{check\_foveated} on foveated fixations at the specification's gazes & a shader $E_2$ of
+  2.04 against a record that says 2.0 \\
+S4 & every sensor's record agrees with its Position pass within a pixel & a record built with the other eye's
+  pose \\
+S5 & Object Index equals the ray-cast object, through flagged non-opaque objects & an object renumbered after the
+  render \\
+S6 & the material and image audits, by solid angle from the head & reported for review, not gated \\
+\bottomrule
+\end{tabularx}
+\caption{The scene gate, \code{fov-render check}. On the calibration room it takes 65\,s on a CPU, 53\,s of
+which is S4 (Chat sandbox, issue~\#18).}\label{tab:scene}
+\end{table}
 
 % ================================================================================================
 \section{Validation}\label{sec:checks}
 
 Every layer ships a check with a known answer and a control: a deliberately broken input that the check must
-reject, because a check that cannot fail tests nothing. A new scene is accepted only when all checks pass on it
-(\code{fov3d-render check}). Table~\ref{tab:checks} lists them.
+reject, because a check that cannot fail tests nothing. A check whose control passes is reported as failed. The
+package's checks run with \code{fov-render selftest} (or \code{python -m fov\_render.checks}); those that need
+Blender are reported as skipped, never as passed, where Blender is missing. Table~\ref{tab:checks} lists them by
+the migration step that introduced them (Section~\ref{sec:built}).
 
 \begin{table}[!htbp]
 \centering\footnotesize
-\begin{tabularx}{\textwidth}{@{}>{\cell}p{2.3cm} >{\cell}p{2.0cm} L >{\cell}p{3.6cm}@{}}
+\begin{tabularx}{\textwidth}{@{}>{\cell}p{1.9cm} L >{\cell}p{4.3cm}@{}}
 \toprule
-Check & Layer & Known answer & Control that must fail \\
+Step & Known answer & Control that must fail \\
 \midrule
-Settings readback & configuration & samples, seed, adaptive sampling and time limit equal the request after every
-  render & animate \code{cycles.samples} in the file \\
-Scene sanity & scene & no holes or back-faces seen from the eye; floor and ceiling at the expected depth below
-  and above the eye & a scene with a wall removed \\
-Pose agreement & rig & the three historical pose formulas agree to $10^{-9}$ on a grid of gazes & flip the yaw
-  sign in one \\
-Roll frame & rig & baseline-projected roll keeps image $+X$ on the baseline at extreme gazes & upright roll at
-  pitch $-89.9^\circ$ \\
-Warp & foveated & rendered ray directions match the numpy model of Section~\ref{sec:raster} & perturb $E_2$ by
-  1\% \\
-Footprint sum & every sensor & foveated: the cone's solid angle $2\pi(1 - \cos\emax)$; panorama: $4\pi$ & drop
-  the $\cos\beta$ factor \\
-Projection & perspective & world points project to their pixels within 0.002 pixel & lens off by 1\% \\
-Ray-cast truth & perspective, panorama & Position within 0.02\,mm of an independent ray cast & move the eye
-  1\,mm \\
-Equirect convention & panorama & Position directions match $(\lambda,\beta)$ of Section~\ref{sec:pano} & swap $u$
-  and $v$ \\
-Range source & record & range from Position equals the Depth pass where Depth is a ray length & compare with a
-  perspective Depth pass \\
-Instance ids & record & Object Index equals the ray-cast object at sampled pixels & renumber an object after
-  rendering \\
-Noise and seeds & engine & the two eyes use different seeds; noise falls as $1/\sqrt{n}$ & render both eyes
-  with one seed \\
-Loud failure & server & a failing request writes \code{fail-NNNN.json} and the process exits 1 & catch the
-  error without exiting \\
+0 files & the vendored files (shader, EXR reader, test scenes, \code{check\_foveated}) are byte-identical to their
+  sources & a one-byte change \\
+1 foveated & fov-3d-vision's \code{check\_foveated} passes on a fov-render fixation; the fixation equals the
+  frozen legacy fixation within pose precision; the record agrees with Position and Depth & a record built
+  with a mirrored yaw \\
+2 numpy & the warp equals the legacy warp (directions, footprints, mask, inverse); the three historical pose
+  formulas agree; the rig reproduces f3d-vision's calibrations, both rolls; footprints sum to the field's solid
+  angle, $2\pi(1-\cos\emax)$ or $4\pi$; \code{pixel\_of} inverts every sensor's rays; triangulation & a yaw sign
+  flip; upright roll at an extreme gaze; the eyes swapped \\
+3 config & the presets reproduce seven legacy render paths (13 comparisons); a change of spp takes effect &
+  \code{cycles.samples} animated in the file \\
+4 scene & the head from \code{EYE}; the instance catalogue, both numberings; the calibration room's holes,
+  back-faces, nadir and zenith; a world-only HDRI scene reproduces its source; the material audit; Object Index
+  against a ray cast; the scene-layer fixes found on new scenes (4.7--4.11) & the ceiling removed; an object
+  renumbered after rendering; the old behaviour of each fix \\
+5 requests & requests round-trip through JSON bit for bit; every malformed one is refused with its reason; a
+  refused request leaves the server serving, a failed render stops it with exit 1 & a valid request is answered \\
+cli & malformed command lines exit 2 before Blender starts; a command-line look equals \code{Session.look} bit for
+  bit; an unreadable scene exits 1; a drafted specification passes its scene; \code{eye} places the head &
+  seeds swapped, the gaze point moved 1\,mm, a broken room \\
+Classroom & on the workstation, against f3d-vision's pinned files: \code{check\_foveated}, the AB1a OptiX
+  settings, the head pose, the instance catalogue of breadth-1 & shader $E_2$ 2.04, a CPU device, the head
+  moved 1\,mm, an object hidden \\
 \bottomrule
 \end{tabularx}
-\caption{Known-answer checks and their controls.}\label{tab:checks}
+\caption{The package's checks and their controls.}\label{tab:checks}
 \end{table}
 
-The check thresholds come from the measured noise floor of Section~\ref{sec:seeds} and from the scene's contrast,
-not from fixed constants. All checks except the noise floor are designed to run in under ten seconds on the
-\code{small} profile.
+The comparisons with the code fov-render replaced use \emph{known answers}: what the legacy code gave, frozen in
+\code{fov\_render/checks/known/} by a tool that re-runs the legacy code. The legacy files themselves are not
+copied into the repository; they are pinned by repository, commit, path and checksum, and rebuilt from a
+checkout's history when a check or a re-freeze needs them. A frozen answer comes from one machine, so renders are
+compared with tolerances and numpy results within $10^{-12}$; the tolerances are a pixel or a pose precision, never a
+constant moved to make a check pass. Each check was also run against mutations of the code
+(a warp $E_2$ off by $10^{-9}$, a pitch off by $10^{-9}$ degrees, a filter width of 1.01, the catalogue's order,
+the head moved 1\,mm, the seeds ignored by the command line) and failed on each.
+
+At the time of writing, 30 checks pass in a CPU sandbox with the \code{bpy} wheel in under a minute, nine of them
+without Blender (Chat sandbox, issue~\#18); the four Classroom checks need the Classroom files and pass on the
+RTX~4090 workstation (issues~\#1 and~\#16).
+
+% ================================================================================================
+\section{How the framework was built}\label{sec:built}
+
+fov-render was not written from scratch: it is the rendering code of fov-3d-vision and f3d-vision, migrated into
+one package in seven steps, each closed only when its checks passed against the code it replaced
+(\code{docs/HISTORY.md}~\cite{fovrenderHist}).
+\begin{enumerate}
+\item The foveated camera: fov-3d-vision's OSL shader behind the new builder, checked by its own
+  \code{check\_foveated} and against its fixations.
+\item The numpy models of the four sensors, the rig and the record, checked against both code bases' formulas.
+\item \code{RenderConfig} and the presets that reproduce each legacy render path.
+\item The scene layer: opening any file, the head, the instance catalogue, the audits and the sanity checks.
+\item \code{Session}, the render server and the JSON requests. f3d-vision's greedy explorer ran unchanged on a
+  \code{Session} and reproduced its frozen Playground-2 run: 356 fixations, 98.82\% of the sphere seen, every
+  equivalence check passed (issue~\#2).
+\item fov-3d-vision's foveated active loop on a \code{Session}: over 50 fixations on the CPU it equalled the
+  legacy loop bit for bit in every file, while a control that moved the IPD by one unit in the last place
+  differed (issue~\#3).
+\item A scene neither code base had used: the Barbershop, through the scene gate. The triage of a second scene,
+  the Barcelona Pavilion, found four bugs in the scene layer, fixed with checks 4.7--4.11 (issue~\#4).
+\end{enumerate}
+The tag \code{v0.1.0} is the last commit that carried the legacy copies and the adapters that ran the two code
+bases on fov-render; after it, the comparisons became the known answers and pinned files of
+Section~\ref{sec:checks} (issue~\#16). One lesson from step~6 is worth keeping. A statistical check that
+compared the spread of two runs of the active loop was withdrawn: the loop is chaotic, so even the unchanged
+legacy loop failed it when its IPD moved by 0.2\,\textmu m. Exact equality, where it can be had, is the stronger
+test; where it cannot, a check must be shown to pass on the legacy code before it judges the new one.
+
+The work was shared between three parties through the repository's GitHub issues: Luiz Velho decided and
+accepted; Claude in a chat sandbox, with the \code{bpy} wheel on a CPU, designed, wrote the code and its checks;
+and Claude Code on an RTX~4090 workstation ran what needed the GPU or the Classroom files and reported. Every
+number in the issues says where it was measured. The method is the N-Surface method of
+f3d-vision~\cite{f3d}, lightened to one file of rules (\code{CLAUDE.md}); the issues are the project's record.
 
 \pagebreak
 
@@ -824,20 +1016,33 @@ The framework simulates a controlled observer, not a real one; its limits are th
 \item \textbf{No physiological torsion.} Roll follows one of two engineering conventions
   (Section~\ref{sec:roll}), not the torsion of a real eye.
 \item \textbf{Back-ends and repeatability.} The OSL camera is verified on OptiX and on CPU; other GPU back-ends
-  are untested. OptiX renders are not bit-reproducible, so exact pairing of conditions reuses saved
-  observations.
+  are untested. OptiX renders are not bit-reproducible: Position and Object Index repeat exactly, radiance does
+  not, so exact pairing of conditions reuses saved observations. CPU renders repeat bit for bit on the
+  calibration room but not on the Classroom (issue~\#9).
+\item \textbf{Object identity.} Instances of one object share its number in the Object Index pass, and objects
+  made by geometry-nodes instancers are listed but not numbered.
 \item \textbf{Reference cost.} Uniform references at foveal spacing take about half an hour per scene at the
   \code{full} profile, so they are rendered once and kept.
+\item \textbf{Not built yet.} Two conveniences of the original design are not in the package: an oracle
+  matcher on a look (pairing the samples both eyes see), and an evaluation-only store for references that an
+  observer session refuses to open. Section~\ref{sec:record} shows both done by hand.
 \end{itemize}
 
-\paragraph{Further reading.} The decisions behind the numbers in this report, each with what would overturn it,
-are in fov-3d-vision's \code{DECISIONS.md}~\cite{fov3dDec}. The warp's derivation and its first measurement are
+\paragraph{Further reading.} The code, its user's guide and its record are in the repository~\cite{fovrender}:
+\code{README.md} for use, \code{docs/PLAN.md} for the decisions taken in building it, \code{docs/HISTORY.md} for
+the migration~\cite{fovrenderHist}, and the GitHub issues for every measurement. The decisions behind the
+numbers in this report, each with what would overturn it, are in fov-3d-vision's
+\code{DECISIONS.md}~\cite{fov3dDec}. The warp's derivation and its first measurement are
 in step A3~\cite{fov3dA3}, and the active loop's results in the Phase C summary~\cite{fov3dC}. The perspective
 explorer's architecture is documented in f3d-vision~\cite{f3dArch}. The sequence of reports from the laboratory
 is summarised in TR-09-2026~\cite{tr09} and TR-11-2026~\cite{tr11}.
 
 % ================================================================================================
-\begin{thebibliography}{9}
+\begin{thebibliography}{99}
+\bibitem{fovrender} VISGRAF Lab. \emph{fov-render}: Blender Cycles rendering for gaze-directed binocular
+  observers. \url{https://github.com/visgraf/fov-render}
+\bibitem{fovrenderHist} VISGRAF Lab. fov-render, \code{docs/HISTORY.md}: the migration.
+  \url{https://github.com/visgraf/fov-render/blob/main/docs/HISTORY.md}
 \bibitem{tr09} Luiz Velho and Claude. ``Experiments on Active 3D Vision''. Technical Report TR-09-2026, VISGRAF
   Lab -- IMPA, 2026.
 \bibitem{tr11} Luiz Velho and Claude. ``Active Foveal 3-D Vision Playground''. Technical Report TR-11-2026,
