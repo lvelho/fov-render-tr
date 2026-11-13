@@ -3,6 +3,7 @@
 % Build: pdflatex twice.
 % Revision of 8 November 2026: the framework is implemented as visgraf/fov-render (package fov_render,
 % command fov-render); names, signatures, the command line and the checks follow the repository.
+% Revision of 13 November 2026: the head moves between looks (fov-render issue #20): Secs. 3.5, 6.5, 8.6.
 \documentclass[11pt,a4paper]{article}
 
 \usepackage[T1]{fontenc}
@@ -28,7 +29,7 @@
 \hypersetup{colorlinks=true,linkcolor=black!70!blue,citecolor=black!70!blue,urlcolor=black!70!blue,
   pdftitle={Foveated Stereo Rendering in Blender: A Unified Sensor Framework},
   pdfauthor={Luiz Velho, with Claude (Anthropic)},
-  pdfsubject={VISGRAF technical report, revised 8 November 2026}}
+  pdfsubject={VISGRAF technical report, revised 13 November 2026}}
 
 % ---------------------------------------------------------------- VISGRAF cover
 % The VISGRAF TR cover comes from techrep-ic.sty. Where the style is available the cover
@@ -73,7 +74,7 @@
 \title{\textbf{Foveated Stereo Rendering in Blender:\\A Unified Sensor Framework}}
 \author{Luiz Velho\\[2pt] \normalsize with Claude (Anthropic)\\[2pt]
   \normalsize VISGRAF Lab, IMPA}
-\date{\normalsize Technical Report \textperiodcentered{} course reading \textperiodcentered{} revised 8 November 2026\\[2pt]
+\date{\normalsize Technical Report \textperiodcentered{} course reading \textperiodcentered{} revised 13 November 2026\\[2pt]
   \normalsize Software: \url{https://github.com/visgraf/fov-render}}
 
 \begin{document}
@@ -85,8 +86,8 @@
 \noindent A camera samples a scene uniformly; an eye does not. This report describes \emph{fov-render}, a
 framework that turns Blender's Cycles path tracer into a binocular, gaze-directed observer. It is open source
 (CC0) at \url{https://github.com/visgraf/fov-render}~\cite{fovrender}: a Python package, \code{fov\_render},
-and a command line, \code{fov-render}. Two eyes on a fixed
-head can each carry one of four sensors: a log-polar foveated camera, a perspective tangent-plane camera, an
+and a command line, \code{fov-render}. Two eyes on a head that may move
+between looks can each carry one of four sensors: a log-polar foveated camera, a perspective tangent-plane camera, an
 equirectangular panorama and a wide reference view. Every look, whatever the sensor, returns the same record: one
 ray per sample with its direction, radiance, solid-angle footprint and, as oracle, the surface it hit. The
 framework unifies two research code bases from the VISGRAF laboratory, fov-3d-vision~\cite{fov3d} and
@@ -167,7 +168,8 @@ fov-render selftest --device CPU   # the package's own checks (Sec. 9)
 \end{lstlisting}
 \end{minipage}
 The tag \code{v0.1.0} marks the end of the migration from the two code bases (Section~\ref{sec:built}); the
-command line of Section~\ref{sec:cli} came after it (issue~\#18). The repository's \code{README.md} is the
+command line of Section~\ref{sec:cli} came after it (issue~\#18), and so did head motion
+(Section~\ref{sec:motion}, issue~\#20). The repository's \code{README.md} is the
 user's guide, \code{docs/PLAN.md} records the design decisions and \code{docs/HISTORY.md} the migration. This
 report describes the design and its reasons; where the two differ in a detail, the repository is right.
 
@@ -200,7 +202,7 @@ sends a request, one handler inside Blender renders it, and one record per eye c
   \node[box, fill=white, minimum width=4.85cm, minimum height=1.45cm, text width=4.55cm] (config) at (5.33,-2.75)
     {\textbf{RenderConfig}\\ {\footnotesize\color{black!65} spp, seeds, box filter, device;\\ read back after every render}};
   \node[box, fill=white, minimum width=4.85cm, minimum height=1.45cm, text width=4.55cm] (rig) at (10.36,-2.75)
-    {\textbf{Rig} (Sec.~\ref{sec:rig})\\ {\footnotesize\color{black!65} eyes at $\pm b/2$, gaze,\\ vergence, roll}};
+    {\textbf{Rig} (Sec.~\ref{sec:rig})\\ {\footnotesize\color{black!65} head per look, eyes at $\pm b/2$,\\ gaze, vergence, roll}};
   \node[lab] at (0.2,-4.5) {sensors (Sec.~\ref{sec:warp}--\ref{sec:sensors}), one chosen per look};
   % row 2: sensors
   \node[hot, minimum width=3.6cm, minimum height=1.45cm, text width=3.3cm] (fov) at (0.3,-4.95)
@@ -234,15 +236,15 @@ provides.}\label{fig:arch}
 
 Each layer has one job:
 \begin{itemize}
-\item \textbf{Scene.} Opens any \code{.blend} file once per session and fixes the head at the scene's \code{EYE}
-  object. It removes anything in the file that would override the framework's settings (an animated seed, extra
+\item \textbf{Scene.} Opens any \code{.blend} file once per session and takes the session's head from the
+  scene's \code{EYE} object. It removes anything in the file that would override the framework's settings (an animated seed, extra
   render passes), numbers every renderable object so the Object Index pass can name it, and runs the sanity
   checks of Section~\ref{sec:checks}.
 \item \textbf{RenderConfig.} One frozen set of Cycles settings for the session: samples per pixel, seeds, a box
   pixel filter, no adaptive sampling or denoising, the GPU back-end. After every render the settings Cycles
   actually used are read back and stored with the look (Section~\ref{sec:noise}).
-\item \textbf{Rig.} Turns a gaze request into a world pose for each eye, with one formula for every sensor
-  (Section~\ref{sec:rig}).
+\item \textbf{Rig.} Turns a gaze request and the look's head into a world pose for each eye, with one formula
+  for every sensor (Section~\ref{sec:rig}).
 \item \textbf{Sensors.} Each sensor has two halves: a numpy \emph{model} that maps pixels to rays and gives each
   pixel's footprint, and a Blender \emph{builder} that creates the camera. Analysis code uses the model without
   Blender (Sections~\ref{sec:warp}--\ref{sec:sensors}).
@@ -288,15 +290,17 @@ Module & What it holds \\
 % ================================================================================================
 \section{Coordinate frames and the binocular rig}\label{sec:rig}
 
-All sensors share one rig: a fixed head with two eyes that rotate about their own centres, so every look is fully
-described by the head pose, which eye, a gaze direction and a roll convention.
+All sensors share one rig: a head with two eyes that rotate about their own centres. The head may move between
+looks but not within one, so every look is fully described by its head pose, which eye, a gaze direction and a
+roll convention.
 
 \subsection{Frames}\label{sec:frames}
 
 \begin{itemize}
 \item \textbf{World $W$.} Blender's frame, in metres, with $+Z$ up.
-\item \textbf{Head $H$.} The rigid frame of the scene's \code{EYE} object, fixed for a whole run: $+X$ to the
-  right (along the baseline), $+Y$ up, $-Z$ forward. It is given by a rotation $R_{WH}$ and an origin $\vb{o}$.
+\item \textbf{Head $H$.} A rigid frame with $+X$ to the right (along the baseline), $+Y$ up and $-Z$ forward,
+  given by a rotation $R_{WH}$ and an origin $\vb{o}$, the cyclopean point. The session's head is the scene's
+  \code{EYE} object; a look may carry its own (Section~\ref{sec:motion}).
 \item \textbf{Eye camera $E$.} Blender's camera convention: the camera looks along its local $-Z$ with $+Y$ up and
   $+X$ right. Computer-vision code uses the OpenCV convention ($x$ right, $y$ down, $z$ forward); the two differ
   by $C = \mathrm{diag}(1,-1,-1)$.
@@ -323,8 +327,8 @@ The world pose of an eye camera is one composition, used by every sensor:
 M_{\mathrm{eye}} = T(\vb{o})\; R_{WH}\; T\bigl(\pm\tfrac{b}{2}\hat{\vb{x}}\bigr)\; R_y(-\psi)\; R_x(\theta)\; R_{\mathrm{roll}} .
 \end{equation}
 Applying $R_y(-\psi)\,R_x(\theta)$ to the camera's forward axis $(0,0,-1)$ gives exactly $\vb{d}(\psi,\theta)$:
-yaw is applied after pitch, so the elevation of the gaze equals $\theta$. The head never translates; only the eyes
-rotate.
+yaw is applied after pitch, so the elevation of the gaze equals $\theta$. Within a look the head is fixed and
+only the eyes rotate; between looks $R_{WH}$ and $\vb{o}$ may change (Section~\ref{sec:motion}).
 
 \subsection{Vergence}\label{sec:vergence}
 
@@ -355,6 +359,53 @@ For a verged pair the fixation's epipolar plane contains the baseline and both g
 roll keeps that plane on the central image row of both eyes. The foveated sensor's warp is circularly symmetric,
 so roll only rotates its disc and does not change what it measures; the perspective pair's rectification depends
 on it. Roll is therefore a property of the rig, recorded with every look, not of the sensor.
+
+\subsection{Head motion}\label{sec:motion}
+
+The head moves between looks, never within one. A look's request may carry its own head pose
+$(R_{WH}, \vb{o})$; without one the look uses the session's head, the scene's \code{EYE}. Every formula of this
+section then holds per look, with that look's head, and both eyes of a look share it.
+
+\paragraph{Relative moves.} \code{HeadPose.moved} moves the head in its own frame: the origin goes to the
+head-frame point $\vb{t}$, then the head turns about its new origin,
+\begin{equation}\label{eq:moved}
+R_{WH}' = R_{WH}\,R_d, \qquad R_d = R_y(-\psi_h)\,R_x(\theta_h)\,R_z(-\phi_h), \qquad
+\vb{o}' = \vb{o} + R_{WH}\,\vb{t},
+\end{equation}
+with the gaze's signs: $+\psi_h$ turns right, $+\theta_h$ tilts up and $+\phi_h$ lowers the right ear. The
+turned head's forward axis is $R_{WH}\,\vb{d}(\psi_h,\theta_h)$, as for an eye's gaze in Eq.~\eqref{eq:gaze}.
+\code{HeadPose.translated} moves the origin by a world vector and does not turn.
+
+\paragraph{The gaze under head motion.} The gaze requests of Section~\ref{sec:vergence} are of two kinds. A
+yaw--pitch gaze, cyclopean or per eye, is measured in the head frame, so it turns with the head, as eyes held
+still in their sockets do. A verged point is a world point, and Eq.~\eqref{eq:vergence} aims both eyes at it from
+wherever the head now is, so the eyes stay on the target while the head moves, as the vestibulo-ocular reflex
+keeps them. Each record stores its look's head, and the eye centre of Eq.~\eqref{eq:centres} for that head is
+the record's origin; the response and \code{meta.json} carry both the look's head and the session's.
+
+\paragraph{A field of the request.} The head is part of each request, not state kept by the server (decision
+D19 in \code{docs/PLAN.md}). A look therefore stays self-contained and can be replayed from its request alone; a
+refused or failed request cannot leave the head somewhere unknown; and a request without a head is byte for byte
+what it was before head motion existed. A caller that thinks in relative moves uses \code{Session.move\_head},
+which keeps a current head on the client side and puts it in every later request (Section~\ref{sec:ex-motion}).
+There is no body frame (D20): a caller with a body or neck model composes it into the head pose of each look.
+
+\paragraph{The cyclopean eye.} The rig's third eye, $C$, sits at the head origin $\vb{o}$. A foveated look on
+$C$ alone is a monocular sensor on the head: with gaze $(0,0)$ it is fixed to the head, and with a yaw--pitch gaze
+it is an eye that saccades within it. With upright roll, an eye turned in a still head and the same turn of the
+head with the eye straight ahead give the same camera pose, to $10^{-16}$ (Chat sandbox, numpy), so a turn can be
+split between eye and head freely. Baseline-projected roll does not share this property: the baseline turns with
+the head but not with an eye, so once yaw and pitch combine the image rolls about the gaze, by $8.3^\circ$ at
+$(35^\circ, 12^\circ)$ and $19.5^\circ$ at $(-40^\circ, 25^\circ)$. Monocular work uses upright roll.
+
+\paragraph{The pivot of a turn.} Eq.~\eqref{eq:moved} turns the head about $\vb{o}$, which is where $C$ is: a
+pure head turn does not move $C$ and produces no motion parallax. A real head turns about the neck, some
+centimetres behind and below the eyes. A turn $R_d$ about a pivot $\vb{p}$, given in the head frame, is the move
+of Eq.~\eqref{eq:moved} with $\vb{t} = \vb{p} - R_d\,\vb{p}$, which leaves the pivot in place:
+\begin{equation}\label{eq:pivot}
+\vb{o}' = \vb{o} + R_{WH}\,(\vb{p} - R_d\,\vb{p}), \qquad R_{WH}' = R_{WH}\,R_d .
+\end{equation}
+This is the first step of a neck model, and for now it is the caller's.
 
 % ================================================================================================
 \section{The foveated log-polar warp}\label{sec:warp}
@@ -568,7 +619,7 @@ stereo, and how fov-3d-vision measures the error of a real matcher against truth
 
 \subsection{Epipolar coordinates on the sphere}\label{sec:epipolar}
 
-With a fixed head, every epipolar plane contains the baseline, the head's $X$ axis. A head-frame direction
+Within a look both eyes share one head, so every epipolar plane contains the baseline, that head's $X$ axis. A head-frame direction
 $\vb{d}$ is therefore best described by two angles:
 \begin{equation}\label{eq:epi}
 \vartheta = \arccos(d_x), \qquad \varphi = \atantwo(d_y,\, -d_z).
@@ -609,6 +660,23 @@ t = \frac{\vb{d}_R\cdot\vb{w} - \kappa\,(\vb{d}_L\cdot\vb{w})}{1-\kappa^2}, \qua
 and the gap between the two closest points is a useful check on the match. What happens to the points afterwards
 (fusion into a surfel map at 12\,mm, the coverage sphere, the gaze policy) is the business of the code that
 consumes the record, not of the rendering framework.
+
+\subsection{Motion parallax}\label{sec:parallax}
+
+Two looks of one eye from different head positions form a stereo pair whose baseline is the displacement
+$\vb{t} = \vb{c}_2 - \vb{c}_1$ between their eye centres. The geometry above carries over with $\vb{t}$ in
+place of $b\,\hat{\vb{x}}$: every plane that contains $\vb{t}$ is an epipolar plane, angles are measured from the
+direction of travel $\hat{\vb{u}} = \vb{t}/\lVert\vb{t}\rVert$, $\vartheta_k = \arccos(\vb{d}_k\cdot\hat{\vb{u}})$,
+and the law of sines gives the distance from the first position,
+\begin{equation}\label{eq:motion}
+r_1 = \lVert\vb{t}\rVert\,\frac{\sin\vartheta_2}{\sin(\vartheta_2 - \vartheta_1)} .
+\end{equation}
+For an observer moving forward every static point falls back, $\vartheta_2 > \vartheta_1$, which is the parallax.
+The two directions must be compared in one frame. Records hold world directions, so a turn of the head between
+the looks is already compensated, and only the translation makes parallax. Eq.~\eqref{eq:invdepth} holds with
+$b\sin\vartheta$ replaced by $\lVert\vb{t}\rVert\sin\vartheta$: depth from motion is undefined towards the
+direction of travel, the focus of expansion, and weakest near it. An observer that looks where it is going puts
+its fovea where motion parallax vanishes. Section~\ref{sec:ex-motion} measures this on a rendered pair.
 
 % ================================================================================================
 \section{Sampling and noise}\label{sec:noise}
@@ -724,10 +792,15 @@ sensors & \code{sensors.Foveated(E2\_deg, e\_max\_deg, s0\_deg=None)}, \code{sen
   \code{sensors.Panorama(preset="preview360")}, \code{sensors.ReferenceView(width, height, half\_fov\_x\_deg)} &
   the camera model; \code{.model} works without Blender \\
 \code{Session} & \code{Session(blend, cfg, rig, access="observation", head=None, instance\_ids="complete",
-  launcher="auto")} & the scene, the render server and the truth boundary; \code{instance\_ids} chooses how
-  objects reached through collection instances are numbered \\
-\code{Look} & \code{session.look(sensor, eyes, gaze, spp=None, seeds=None, out\_dir=None, outputs=("exr",))} &
-  the request, the response, \code{meta}, \code{exr} and \code{.records} \\
+  launcher="auto")}; \code{move\_head(...)}, \code{reset\_head()} & the scene, the render server and the truth
+  boundary; \code{head=} overrides the session's head, \code{instance\_ids} chooses how objects reached through
+  collection instances are numbered; \code{move\_head} sets the head of later looks, on the client side \\
+\code{HeadPose} & \code{session.session\_head}, \code{session.head}; \code{.moved(translate\_h, yaw\_deg,
+  pitch\_deg, roll\_deg)}, \code{.translated(dt\_w)} & a head pose $(R_{WH}, \vb{o})$ and the moves of
+  Eq.~\eqref{eq:moved} \\
+\code{Look} & \code{session.look(sensor, eyes, gaze, spp=None, seeds=None, out\_dir=None, outputs=("exr",),
+  head=None)} & the request, the response, \code{meta}, \code{exr} and \code{.records}; \code{head=} for this
+  look only \\
 \code{SampleRecord} & inside a \code{Look}, or \code{SampleRecord.load(path)} & one eye's samples
   (Section~\ref{sec:record}) \\
 \bottomrule
@@ -753,7 +826,8 @@ centre), \code{direction}, \code{value} (linear RGB radiance), \code{footprint\_
 labels \code{eye}, \code{look\_id} and \code{sensor}. Its oracle fields are \code{position\_w},
 \code{distance\_m} (infinite on a miss) and \code{instance\_id} (0 on a miss). Helpers convert between views:
 \code{rec.as\_raster("value")} rebuilds the image, and \code{rec.direction\_head} and \code{rec.epipolar()} give
-head-frame directions and the angles $(\vartheta,\varphi)$ of Section~\ref{sec:epipolar}.
+head-frame directions and the angles $(\vartheta,\varphi)$ of Section~\ref{sec:epipolar}. Every record also
+carries its look's head, \code{head\_R\_wh} and \code{head\_origin\_w} (Section~\ref{sec:motion}).
 
 The session's \code{access} decides who may see what. With \code{access="observation"}, the default, oracle fields
 are not loaded and reading one raises \code{AccessError}, so a learning observer cannot cheat by accident. An
@@ -818,10 +892,49 @@ needed to compare the two sensors in the same loop. Compare them at equal cost:
 \code{eye.model(profile).rays\_per\_eye} gives 50{,}269 rays for the foveated sensor and 409{,}600 for the
 perspective one at \code{full}, so equal rays means about eight foveated looks per perspective look.
 
+\subsection{Worked example: depth from motion}\label{sec:ex-motion}
+
+This example implements Section~\ref{sec:parallax} with the cyclopean foveated sensor of
+Section~\ref{sec:motion}, fixed to the head, which steps 10\,cm right and 20\,cm forward between two looks.
+
+\noindent\begin{minipage}{\linewidth}
+\begin{lstlisting}[language=Python]
+with Session(blend, RenderConfig(profile="small"), Rig(roll="upright"),
+             access="oracle") as s:
+    eye, recs = sensors.Foveated(E2_deg=2.0, e_max_deg=45.0), []
+    for k in range(2):
+        look = s.look(eye, eyes=("C",), gaze=Gaze.yaw_pitch(0, 0),   # fixed to the head
+                      outputs=("exr", "records"))
+        recs.append(look.records[0])
+        s.move_head(translate_h=(0.10, 0.0, -0.20))   # 10 cm right, 20 cm forward
+A, B = recs
+t = B.head_origin_w - A.head_origin_w     # the motion baseline, world
+u = t / np.linalg.norm(t)                  # the direction of travel
+hit = np.isfinite(A.distance_m)
+P = A.position_w[hit].astype(float)        # oracle: what each ray of A hit
+unit = lambda v: v / np.linalg.norm(v, axis=1, keepdims=True)
+thA = np.arccos(unit(P - A.origin) @ u)    # angles from the direction of travel
+thB = np.arccos(unit(P - B.origin) @ u)
+assert (thB > thA).all()                   # moving forward, every point falls back
+rA, _ = geometry.triangulate_sine(thA, thB, np.linalg.norm(t))
+err = rA - A.distance_m[hit]               # zero up to round-off: a check, not a result
+\end{lstlisting}
+\end{minipage}
+
+On the calibration room at the \code{small} profile all 12{,}492 samples hit, and the largest \code{|err|} is
+$2.4\times10^{-11}$\,m (Chat sandbox, CPU). The oracle gives both directions here. Replacing the first one with
+the record's own \code{A.direction[hit]}, the ray through the pixel centre while Position comes from a point
+inside the pixel, turns the check into a measurement of what the sensor's spacing costs. The median error is then
+0.6\,mm, the 99th percentile 1.0\,cm and the largest 4.6\,cm. The median relative error is 0.19\% within
+$5^\circ$ of the direction of travel and 0.01\% between $15^\circ$ and $45^\circ$ from it, as
+Eq.~\eqref{eq:invdepth} with $\lVert\vb{t}\rVert\sin\vartheta$ predicts. A real matcher's ray in \code{B}, in
+place of the oracle's, makes the same lines an evaluation of depth from motion.
+
 \subsection{Requests and the command line}\label{sec:cli}
 
 Every \code{look} is serialised as a JSON request (schema \code{fov-render-request-v1}) holding the sensor and its
-parameters, the eyes, the gaze, an optional rig override, spp, seeds, the output folder and what to write. The
+parameters, the eyes, the gaze, an optional rig override, an optional head, spp, seeds, the output folder and
+what to write. The
 session itself is one more request, \code{fov-render-session-v1}: the scene, the \code{RenderConfig}, the rig, the
 access level and the Object Index numbering. Both are validated before anything renders, and a malformed one is
 refused with every reason at once. Each look's folder holds the request, a \code{meta.json} with the poses, the
@@ -836,6 +949,8 @@ fov-render look --blend scene_eye.blend --sensor foveated --eyes L R \
     --point 0.4 2.1 1.1 --profile full --records --out runs/demo/f0000
 fov-render look --blend scene_eye.blend --sensor perspective --gaze 10 -5 --vergence 2.1 \
     --seeds L=2111 R=2112 --out runs/demo/p0000
+fov-render look --blend scene_eye.blend --sensor foveated --eyes C --gaze 0 0 \
+    --head-move 0 0 -0.5 --head-turn 20 0 0 --out runs/demo/moved
 fov-render panorama --blend scene_eye.blend --preset preview360 --eye C \
     --profile small --out previews/ref_C
 fov-render requests --blend scene_eye.blend looks.json --out runs/demo
@@ -844,8 +959,10 @@ fov-render info --blend scene_eye.blend
 
 Sensor fields are passed as \code{-{}-param KEY=VALUE} (\code{E2\_deg=2.0 e\_max\_deg=45}); the gaze is one of
 \code{-{}-point}, \code{-{}-gaze YAW PITCH} with an optional \code{-{}-vergence}, \code{-{}-per-eye L=YAW,PITCH R=...}, or
-none, for a fixed look along the head. A \code{requests} file is a JSON list of looks, each with the request's
-fields; the scene is opened once for all of them. \code{info} prints the scene report as JSON: the file and its
+none, for a fixed look along the head. \code{-{}-head-move DX DY DZ} (metres) and \code{-{}-head-turn YAW PITCH
+ROLL} (degrees) move the session's head for one look, by Eq.~\eqref{eq:moved}. A \code{requests} file is a JSON
+list of looks, each with the request's fields, an absolute \code{head} among them; the scene is opened once for
+all of them. \code{info} prints the scene report as JSON: the file and its
 checksum, the head, the view layer that renders, the numbered objects and the material and image audits. A command-line look sends exactly the request
 \code{Session.look} sends, and the package's checks verify that the two give bit-identical images and records on
 the CPU (Section~\ref{sec:checks}). Every folder also gets \code{fov-render-run.json}: the command, the session,
@@ -943,6 +1060,11 @@ Step & Known answer & Control that must fail \\
 cli & malformed command lines exit 2 before Blender starts; a command-line look equals \code{Session.look} bit for
   bit; an unreadable scene exits 1; a drafted specification passes its scene; \code{eye} places the head &
   seeds swapped, the gaze point moved 1\,mm, a broken room \\
+head & requests with a head round-trip and malformed heads are refused, while a request without one is byte
+  for byte what it was before; \code{moved} as defined; \code{move\_head} fills in exactly the requests it should;
+  the session's head given as a look's renders bit for bit as no head (on the CPU); from five head poses every
+  sensor's record sits on the requested head & a yaw sign flip; the head moved 1\,mm; a handler that ignores the
+  request's head \\
 Classroom & on the workstation, against f3d-vision's pinned files: \code{check\_foveated}, the AB1a OptiX
   settings, the head pose, the instance catalogue of breadth-1 & shader $E_2$ 2.04, a CPU device, the head
   moved 1\,mm, an object hidden \\
@@ -960,9 +1082,10 @@ constant moved to make a check pass. Each check was also run against mutations o
 (a warp $E_2$ off by $10^{-9}$, a pitch off by $10^{-9}$ degrees, a filter width of 1.01, the catalogue's order,
 the head moved 1\,mm, the seeds ignored by the command line) and failed on each.
 
-At the time of writing, 30 checks pass in a CPU sandbox with the \code{bpy} wheel in under a minute, nine of them
-without Blender (Chat sandbox, issue~\#18); the four Classroom checks need the Classroom files and pass on the
-RTX~4090 workstation (issues~\#1 and~\#16).
+At the time of writing, 35 checks pass in a CPU sandbox with the \code{bpy} wheel in about a minute and a half,
+twelve of them without Blender (Chat sandbox, issue~\#20), and the same 35 pass on OptiX in 40\,s (RTX~4090
+workstation, issue~\#20); the four Classroom checks need the Classroom files and pass on the workstation
+(issues~\#1 and~\#16).
 
 % ================================================================================================
 \section{How the framework was built}\label{sec:built}
@@ -992,6 +1115,12 @@ compared the spread of two runs of the active loop was withdrawn: the loop is ch
 legacy loop failed it when its IPD moved by 0.2\,\textmu m. Exact equality, where it can be had, is the stronger
 test; where it cannot, a check must be shown to pass on the legacy code before it judges the new one.
 
+Two capabilities came after the tag, each through one issue with its checks: the command line (issue~\#18) and
+head motion (issue~\#20). Head motion added a second lesson. Its bit-for-bit check failed on the GPU, though not
+because of the head: two identical looks on OptiX already differ in about 13\% of their radiance values, by one
+or two float32 units in the last place, on the code before the change as well (RTX~4090 workstation). A
+bit-for-bit check therefore runs on the CPU whatever device the checks are given.
+
 The work was shared between three parties through the repository's GitHub issues: Luiz Velho decided and
 accepted; Claude in a chat sandbox, with the \code{bpy} wheel on a CPU, designed, wrote the code and its checks;
 and Claude Code on an RTX~4090 workstation ran what needed the GPU or the Classroom files and reported. Every
@@ -1005,9 +1134,12 @@ f3d-vision~\cite{f3d}, lightened to one file of rules (\code{CLAUDE.md}); the is
 
 The framework simulates a controlled observer, not a real one; its limits are the price of an exact oracle.
 \begin{itemize}
-\item \textbf{Fixed head.} Eyes rotate, the head does not translate, so surfaces hidden from the head origin are
-  never targets. Self-occluded surfaces need head motion, which fov-3d-vision tested only as a prescribed lateral
-  move (FSG7a).
+\item \textbf{Head motion between looks only.} The head moves from one look to the next, not during a look: no
+  motion blur and no rolling shutter. Head turns pivot on the cyclopean point unless the caller gives a pivot
+  (Eq.~\eqref{eq:pivot}), and there is no body or neck model. The scene gate's survey of holes and back-faces (S2)
+  runs from the session's head only, so a moved head can see holes it does not report: in the Classroom, a head
+  moved 0.5\,m forward and turned $20^\circ$ right found no surface for about 3\% of its foveated samples, all
+  towards a window (RTX~4090 workstation, issue~\#20).
 \item \textbf{First-hit truth.} Position and Object Index describe the first surface a ray meets. For glass,
   cut-out alpha, volumes or emitters this differs from what the pixel shows; such objects are flagged when a
   scene is opened, and each experiment decides whether to exclude them.
